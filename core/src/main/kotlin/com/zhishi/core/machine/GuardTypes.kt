@@ -2,6 +2,7 @@ package com.zhishi.core.machine
 
 import com.zhishi.core.model.CooldownKind
 import com.zhishi.core.model.GroupConfig
+import com.zhishi.core.time.AppClock
 
 /** 守护状态机状态。 */
 enum class GuardState {
@@ -161,13 +162,16 @@ data class GuardStateData(
 abstract class GuardStateMachine(
     val packageName: String,
     protected val clock: AppClock,
-    protected val config: GroupConfig,
+    protected var config: GroupConfig,
 ) {
     /** 当前快照流。 */
     abstract val snapshot: kotlinx.coroutines.flow.StateFlow<GuardSnapshot>
 
     /** 处理事件，返回本次迁移产生的效果。 */
     abstract fun dispatch(event: GuardEvent): List<GuardEffect>
+
+    /** 分组配置被编辑后热更新（不得清空会话/冷却状态；换组由协调器重建实例处理）。 */
+    abstract fun onConfigUpdated(newConfig: GroupConfig)
 
     /** 导出可持久化状态。 */
     abstract fun exportState(): GuardStateData
