@@ -152,6 +152,12 @@ data class GuardStateData(
     val cooldownDeadlineMillis: Long? = null,
     /** 本会话延时是否已使用。 */
     val extensionUsed: Boolean = false,
+    /**
+     * 延时发起前被冻结的冷却（kind + 剩余）：从冷却浮层发起延时时导出，
+     * 恢复后延时结束/离开/确定均按该剩余续接冷却，而非重置满额。
+     */
+    val pendingCooldownKind: CooldownKind? = null,
+    val pendingCooldownRemainingMillis: Long? = null,
 ) {
     companion object {
         val EMPTY = GuardStateData(GuardState.INACTIVE)

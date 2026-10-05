@@ -273,9 +273,15 @@ class DefaultGuardStateMachine(
                 effects
             }
             GuardState.TIME_UP -> {
-                // 用户自行离开：不 GoHome，直接进到期冷却
+                // 用户自行离开：不 GoHome；有被冻结的冷却（延时后）按剩余续接，否则进满额到期冷却
                 val effects = mutableListOf<GuardEffect>()
-                enterCooldown(CooldownKind.EXPIRY, config.time.expiryCooldownMillis, effects, goHome = false, hideOverlay = true, flushState = false)
+                val pendingKind = pendingCooldownKind
+                pendingCooldownKind = null
+                if (pendingKind != null) {
+                    enterCooldown(pendingKind, pendingCooldownRemainingMillis, effects, goHome = false, hideOverlay = true, flushState = false)
+                } else {
+                    enterCooldown(CooldownKind.EXPIRY, config.time.expiryCooldownMillis, effects, goHome = false, hideOverlay = true, flushState = false)
+                }
                 effects
             }
             GuardState.EXPIRY_COOLDOWN, GuardState.ABANDON_COOLDOWN -> {
@@ -579,6 +585,14 @@ class DefaultGuardStateMachine(
                 state = GuardState.EXTENSION_RUNNING
                 extensionRemainingMillis = (data.remainingMillis ?: 0L).coerceAtLeast(0L)
                 extensionUsed = true
+                pendingCooldownKind = data.pendingCooldownKind
+                pendingCooldownRemainingMillis = data.pendingCooldownRemainingMillis ?: 0L
+            }
+            GuardState.TIME_UP -> {
+                state = GuardState.TIME_UP
+                extensionUsed = data.extensionUsed
+                pendingCooldownKind = data.pendingCooldownKind
+                pendingCooldownRemainingMillis = data.pendingCooldownRemainingMillis ?: 0L
             }
             GuardState.EXPIRY_COOLDOWN, GuardState.ABANDON_COOLDOWN -> {
                 val kind = if (data.kind == GuardState.EXPIRY_COOLDOWN) CooldownKind.EXPIRY else CooldownKind.ABANDON
@@ -608,10 +622,12 @@ class DefaultGuardStateMachine(
             remainingMillis = graceRemainingMillis,
             extensionUsed = extensionUsed,
         )
-        GuardState.EXTENSION_RUNNING -> GuardStateData(
-            kind = GuardState.EXTENSION_RUNNING,
-            remainingMillis = extensionRemainingMillis,
-            extensionUsed = true,
+        GuardState.EXTENSION_RUNNING, GuardState.TIME_UP -> GuardStateData(
+            kind = state,
+            remainingMillis = if (state == GuardState.EXTENSION_RUNNING) extensionRemainingMillis else null,
+            extensionUsed = extensionUsed,
+            pendingCooldownKind = pendingCooldownKind,
+            pendingCooldownRemainingMillis = pendingCooldownKind?.let { pendingCooldownRemainingMillis },
         )
         GuardState.EXPIRY_COOLDOWN, GuardState.ABANDON_COOLDOWN -> GuardStateData(
             kind = state,
