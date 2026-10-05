@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">知时</string>
+    <string name="accessibility_service_label">知时前台检测</string>
+    <string name="accessibility_service_description">监听窗口切换事件以感知当前前台应用，在守护应用打开时弹出拦截浮层。本服务不读取、不记录任何屏幕内容，也不联网。</string>
 </resources>

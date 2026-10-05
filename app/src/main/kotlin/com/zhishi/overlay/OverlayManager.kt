@@ -1,0 +1,123 @@
+package com.zhishi.overlay
+
+import android.content.Context
+import android.graphics.PixelFormat
+import android.provider.Settings
+import android.view.WindowManager
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.ui.platform.ComposeView
+import androidx.savedstate.setViewTreeSavedStateRegistryOwner
+import androidx.lifecycle.setViewTreeLifecycleOwner
+import androidx.lifecycle.setViewTreeViewModelStoreOwner
+import com.zhishi.core.machine.OverlaySpec
+import com.zhishi.guard.ExitAction
+import com.zhishi.guard.SampleGuard
+import kotlinx.coroutines.flow.MutableStateFlow
+
+/**
+ * 拦截浮层管理器：TYPE_APPLICATION_OVERLAY 全屏悬浮窗承载 ComposeView。
+ * 同一时刻只显示一个浮层（最新守护前台应用）；FLAG_NOT_FOCUSABLE 保证系统手势仍可用，
+ * 用户永远能回到桌面 —— 防锁死底线。
+ */
+class OverlayManager(
+    private val appContext: Context,
+    private val exitAction: ExitAction,
+) {
+    private val windowManager = appContext.getSystemService(WindowManager::class.java)
+    private val content = MutableStateFlow<OverlayContent?>(null)
+
+    private var currentPackage: String? = null
+    private var composeView: ComposeView? = null
+    private var lifecycleOwner: OverlayLifecycleOwner? = null
+
+    /** 状态机路径：显示/刷新浮层。 */
+    fun show(packageName: String, appName: String, spec: OverlaySpec, remainingMillis: Long? = null) {
+        if (!Settings.canDrawOverlays(appContext)) return
+        currentPackage = packageName
+        content.value = OverlayContent.Machine(packageName, appName, spec, remainingMillis)
+        attachIfNeeded()
+    }
+
+    /** ticket 01 示例守护应用演示路径（不走状态机）。 */
+    fun showSample(appName: String) {
+        if (!Settings.canDrawOverlays(appContext)) return
+        currentPackage = SampleGuard.PACKAGE
+        content.value = OverlayContent.Sample(appName)
+        attachIfNeeded()
+    }
+
+    /** 关闭浮层；指定包名时仅当当前浮层属于该包才关闭。 */
+    fun hide(packageName: String? = null) {
+        if (packageName != null && currentPackage != packageName) return
+        currentPackage = null
+        content.value = null
+        detach()
+    }
+
+    fun hideAll() = hide(null)
+
+    /**
+     * 快照同步：浮层内容以状态机快照收敛（效果路径之外的兜底，含冷却倒计时刷新）。
+     * 只允许当前正在显示的包刷新或隐藏自己，不会抢占别的浮层。
+     */
+    fun syncFromMachine(packageName: String, appName: String, spec: OverlaySpec?, remainingMillis: Long?) {
+        val showing = currentPackage
+        if (spec == null) {
+            if (showing == packageName) hide(packageName)
+            return
+        }
+        if (showing != null && showing != packageName) return
+        show(packageName, appName, spec, remainingMillis)
+    }
+
+    private fun attachIfNeeded() {
+        if (composeView != null) return
+        if (!Settings.canDrawOverlays(appContext)) return
+
+        val owner = OverlayLifecycleOwner().apply { performCreate() }
+        val view = ComposeView(appContext).apply {
+            setViewTreeLifecycleOwner(owner)
+            setViewTreeViewModelStoreOwner(owner)
+            setViewTreeSavedStateRegistryOwner(owner)
+            setContent {
+                MaterialTheme {
+                    OverlayRoot(content) {
+                        // 示例浮层"回桌面"：关浮层 + 退出动作
+                        exitAction.goToHome()
+                        hideAll()
+                    }
+                }
+            }
+        }
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            PixelFormat.TRANSLUCENT,
+        )
+        try {
+            windowManager.addView(view, params)
+        } catch (e: Exception) {
+            // 权限可能刚被撤销等窗口级异常：不致命，放弃本次显示
+            owner.destroy()
+            return
+        }
+        composeView = view
+        lifecycleOwner = owner
+        owner.resume() // attach 后推进到 RESUMED
+    }
+
+    private fun detach() {
+        val view = composeView ?: return
+        val owner = lifecycleOwner
+        composeView = null
+        lifecycleOwner = null
+        try {
+            windowManager.removeViewImmediate(view)
+        } catch (e: Exception) {
+            // 视图可能已被窗口侧移除
+        }
+        owner?.destroy() // detach 后销毁，下次显示重建全新宿主与组合
+    }
+}
