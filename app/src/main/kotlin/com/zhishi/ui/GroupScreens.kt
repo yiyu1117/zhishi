@@ -278,7 +278,7 @@ internal fun GroupDetailScreen(groupId: String, onBack: () -> Unit, onPickApps: 
                     Text("六项机制", style = MaterialTheme.typography.titleMedium)
                     Spacer(Modifier.height(4.dp))
                     Text(
-                        "本版本仅存储配置，行为将在后续版本生效。",
+                        "机制开关与下方参数保存后立即生效。",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -311,15 +311,19 @@ internal fun GroupDetailScreen(groupId: String, onBack: () -> Unit, onPickApps: 
                             )
                         }
                     }
-                    Spacer(Modifier.height(8.dp))
-                    Text(
-                        "每日限额：" + when {
-                            group.config.dailyLimitMinutes < 0 -> "禁用（平禁）"
-                            group.config.dailyLimitMinutes == 0 -> "不限"
-                            else -> "${group.config.dailyLimitMinutes} 分钟"
+                    Spacer(Modifier.height(16.dp))
+                    // 每日限额三态 + 全部时间参数编辑（story 29/33）；写入保留 mechanisms，
+                    // 经 updateConfig 落盘并热更新状态机；自律锁锁定时整区禁用
+                    GroupConfigEditSection(
+                        config = group.config,
+                        writable = !lock.locked,
+                        disableConfirmText = if (group.kind == GroupKind.DEFAULT) {
+                            "默认组覆盖所有未分组的用户应用（当前共 ${members.size} 个）。" +
+                                "禁用每日限额后，这些应用将完全禁止使用（打开即弹「禁止使用」浮层）。"
+                        } else {
+                            null
                         },
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        onUpdate = { next -> repo.updateConfig(group.id, next) },
                     )
                 }
             }
