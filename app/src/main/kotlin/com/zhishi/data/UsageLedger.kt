@@ -31,10 +31,18 @@ import kotlinx.coroutines.withContext
  * ### 恢复语义（architecture.md「恢复语义」，由协调器重建状态机时执行，本层原样存取）
  * - `kind = RUNNING` 的记录恢复为 `GRACE`（等同退后台，宽限期从头计）；
  * - 冷却按 `cooldown_deadline_millis` 绝对截止恢复（停机时间计入）；
- * - 当日记账与延时已用标记完整恢复。
+ * - 当日记账与延时已用标记完整恢复；
+ * - 落盘于旧自然日的 `QUOTA_EXHAUSTED` 由协调器按 [GuardStateRecord.savedDay] 判定丢弃
+ *   （重启跨零点不会再触发 `DayChanged`，不丢弃会把用户按昨日额度禁用一整天）。
  *
  * 全部 API 为 suspend 并切 [Dispatchers.IO]；不接协调器（落盘时机/恢复/切日由主控接线）。
  */
+/** 守护状态恢复记录：[data] 为恢复数据本体，[savedDay] 为该行最后写入时的本地自然日（跨日失效判定用）。 */
+data class GuardStateRecord(
+    val data: GuardStateData,
+    val savedDay: String,
+)
+
 class UsageLedger(context: Context) : SQLiteOpenHelper(
     context.applicationContext,
     DB_NAME,
@@ -146,16 +154,17 @@ class UsageLedger(context: Context) : SQLiteOpenHelper(
         }
     }
 
-    /** 读取全部应用的恢复数据（启动恢复遍历用）。 */
-    suspend fun loadAllGuardStates(): Map<String, GuardStateData> = withContext(Dispatchers.IO) {
-        val result = LinkedHashMap<String, GuardStateData>()
+    /** 读取全部应用的恢复记录（启动恢复遍历用；[GuardStateRecord.savedDay] 供协调器丢弃跨日失效的当日态）。 */
+    suspend fun loadAllGuardStates(): Map<String, GuardStateRecord> = withContext(Dispatchers.IO) {
+        val result = LinkedHashMap<String, GuardStateRecord>()
         readableDatabase.rawQuery(
-            "SELECT package, kind, remaining_millis, cooldown_deadline_millis, extension_used FROM guard_state",
+            "SELECT package, kind, remaining_millis, cooldown_deadline_millis, extension_used, updated_at FROM guard_state",
             null,
         ).use { cursor ->
             while (cursor.moveToNext()) {
-                val data = cursor.toGuardStateData()
-                if (data != null) result[cursor.getString(0)] = data
+                val data = cursor.toGuardStateData() ?: continue
+                val savedDay = localDayIso(cursor.getLong(cursor.getColumnIndexOrThrow(COL_UPDATED_AT)))
+                result[cursor.getString(0)] = GuardStateRecord(data, savedDay)
             }
         }
         result

@@ -8,6 +8,7 @@ import com.zhishi.core.machine.DefaultGuardStateMachine
 import com.zhishi.core.machine.GuardEffect
 import com.zhishi.core.machine.GuardEvent
 import com.zhishi.core.machine.GuardSnapshot
+import com.zhishi.core.machine.GuardState
 import com.zhishi.core.machine.GuardStateData
 import com.zhishi.core.machine.GuardStateMachine
 import com.zhishi.core.machine.ToastEvent
@@ -104,7 +105,12 @@ class GuardCoordinator(
         // 先载入记账与恢复数据，再对账创建状态机
         scope.launch {
             val day = todayIso()
+            // 跨日恢复：旧自然日落盘的 QUOTA_EXHAUSTED 等同 DayChanged 重置（丢弃，按 INACTIVE 重建）——
+            // 启动时 currentDay 已是今天，DayChanged 不会再触发，不丢弃会把用户按昨日额度禁用一整天。
+            // 冷却的 deadline 为绝对时刻、其余状态在进程内本就跨零点保留，均照常恢复。
             restoredStates = ledger.loadAllGuardStates()
+                .filterValues { rec -> rec.savedDay == day || rec.data.kind != GuardState.QUOTA_EXHAUSTED }
+                .mapValues { it.value.data }
             ledger.dayTotals(day).forEach { (pkg, used) -> usedTodayCache[pkg] = used }
             bootstrapped = true
             rulesSnapshot?.let(::onRulesChanged)
@@ -125,6 +131,10 @@ class GuardCoordinator(
         machineJobs.clear()
         lastForeground = null
         rulesSnapshot = null
+        // 复位记账/恢复引导状态：再次 start() 时重新载入，避免沿用本进程上个会话的残留缓存
+        bootstrapped = false
+        restoredStates = emptyMap()
+        usedTodayCache.clear()
     }
 
     // endregion
@@ -223,10 +233,10 @@ class GuardCoordinator(
         val day = todayIso()
         val usedToday = machine.snapshot.value.usedTodayMillis
         val state = machine.exportState()
+        usedTodayCache[packageName] = usedToday // 同步回写：后续 createMachine 读到的是最新值
         scope.launch {
             ledger.setUsage(packageName, day, usedToday)
             ledger.saveGuardState(packageName, state)
-            usedTodayCache[packageName] = usedToday
         }
     }
 
@@ -365,10 +375,10 @@ class GuardCoordinator(
         machines.remove(pkg)
         machineConfigs.remove(pkg)
         overlayManager.hide(pkg)
+        usedTodayCache[pkg] = usedToday // 同步回写：换组紧接 createMachine 时当日累计不回退
         scope.launch {
             ledger.setUsage(pkg, day, usedToday)
             ledger.clearGuardState(pkg)
-            usedTodayCache[pkg] = usedToday
         }
     }
 
