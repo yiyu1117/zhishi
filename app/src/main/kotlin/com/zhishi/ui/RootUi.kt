@@ -139,6 +139,7 @@ internal sealed interface Screen {
     data object Groups : Screen
     data class GroupDetail(val groupId: String) : Screen
     data class AppPicker(val groupId: String) : Screen
+    data object Settings : Screen
 }
 
 @Composable
@@ -146,7 +147,10 @@ internal fun MainScreen() {
     var screen by remember { mutableStateOf<Screen>(Screen.Groups) }
     Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         when (val current = screen) {
-            Screen.Groups -> GroupListScreen(onOpenGroup = { screen = Screen.GroupDetail(it) })
+            Screen.Groups -> GroupListScreen(
+                onOpenGroup = { screen = Screen.GroupDetail(it) },
+                onOpenSettings = { screen = Screen.Settings },
+            )
             is Screen.GroupDetail -> GroupDetailScreen(
                 groupId = current.groupId,
                 onBack = { screen = Screen.Groups },
@@ -156,6 +160,7 @@ internal fun MainScreen() {
                 groupId = current.groupId,
                 onBack = { screen = Screen.GroupDetail(current.groupId) },
             )
+            Screen.Settings -> SettingsScreen(onBack = { screen = Screen.Groups })
         }
     }
 }

@@ -60,26 +60,44 @@ import kotlinx.coroutines.launch
 // region 分组列表
 
 @Composable
-internal fun GroupListScreen(onOpenGroup: (String) -> Unit) {
+internal fun GroupListScreen(onOpenGroup: (String) -> Unit, onOpenSettings: () -> Unit) {
     val repo = AppGraph.groupRepository
     val scope = rememberCoroutineScope()
     val groups by repo.groups.collectAsStateWithLifecycle(initialValue = emptyList())
     val assignments by repo.assignments.collectAsStateWithLifecycle(initialValue = emptyMap())
     val apps by AppGraph.appCatalog.apps.collectAsStateWithLifecycle(initialValue = emptyList())
     LaunchedEffect(Unit) { AppGraph.appCatalog.ensureLoaded() }
+    val lock = rememberDisciplineLockUi()
 
     var showCreateDialog by remember { mutableStateOf(false) }
     var newGroupName by remember { mutableStateOf("") }
 
     Scaffold(
-        topBar = { TopAppBar(title = { Text("知时 · 应用分组") }) },
+        topBar = {
+            TopAppBar(
+                title = { Text("知时 · 应用分组") },
+                actions = {
+                    TextButton(onClick = onOpenSettings) { Text("设置") }
+                },
+            )
+        },
         floatingActionButton = {
-            FloatingActionButton(onClick = { newGroupName = ""; showCreateDialog = true }) {
+            // 自律锁生效中（含配置加载期 fail-closed）时不可新建分组
+            FloatingActionButton(onClick = {
+                if (!lock.locked) {
+                    newGroupName = ""
+                    showCreateDialog = true
+                }
+            }) {
                 Text("＋", fontSize = 24.sp)
             }
         },
     ) { padding ->
         Column(Modifier.padding(padding).fillMaxSize()) {
+            if (lock.config != null && lock.locked) {
+                DisciplineLockBanner(lock.windowText)
+                Spacer(Modifier.height(8.dp))
+            }
             if (groups.isEmpty()) {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     CircularProgressIndicator()
@@ -116,7 +134,7 @@ internal fun GroupListScreen(onOpenGroup: (String) -> Unit) {
             },
             confirmButton = {
                 TextButton(
-                    enabled = newGroupName.isNotBlank(),
+                    enabled = newGroupName.isNotBlank() && !lock.locked,
                     onClick = {
                         val name = newGroupName.trim()
                         showCreateDialog = false
@@ -211,6 +229,9 @@ internal fun GroupDetailScreen(groupId: String, onBack: () -> Unit, onPickApps: 
     }
 
     var showDeleteDialog by remember { mutableStateOf(false) }
+    // 保护提醒：待确认开启的机制（确认才写入，取消则开关回弹）
+    var pendingMechanism by remember { mutableStateOf<Mechanism?>(null) }
+    val lock = rememberDisciplineLockUi()
     val members = membersOf(group, assignments, apps)
 
     Scaffold(
@@ -232,6 +253,10 @@ internal fun GroupDetailScreen(groupId: String, onBack: () -> Unit, onPickApps: 
                 .verticalScroll(rememberScrollState())
                 .padding(16.dp),
         ) {
+            if (lock.config != null && lock.locked) {
+                DisciplineLockBanner(lock.windowText)
+                Spacer(Modifier.height(12.dp))
+            }
             when (group.kind) {
                 GroupKind.BLACKLIST -> SectionCard(
                     title = "平禁说明",
@@ -263,14 +288,17 @@ internal fun GroupDetailScreen(groupId: String, onBack: () -> Unit, onPickApps: 
                             )
                             Switch(
                                 checked = group.config.mechanismEnabled(mechanism),
+                                enabled = !lock.locked,
                                 onCheckedChange = { on ->
-                                    scope.launch {
-                                        val next = if (on) {
-                                            group.config.mechanisms + mechanism
-                                        } else {
-                                            group.config.mechanisms - mechanism
+                                    if (lock.locked) return@Switch
+                                    if (on) {
+                                        // 保护提醒：开启前确认影响范围
+                                        pendingMechanism = mechanism
+                                    } else {
+                                        scope.launch {
+                                            val next = group.config.mechanisms - mechanism
+                                            repo.updateConfig(group.id, group.config.copy(mechanisms = next))
                                         }
-                                        repo.updateConfig(group.id, group.config.copy(mechanisms = next))
                                     }
                                 },
                             )
@@ -296,7 +324,7 @@ internal fun GroupDetailScreen(groupId: String, onBack: () -> Unit, onPickApps: 
                     style = MaterialTheme.typography.titleMedium,
                     modifier = Modifier.weight(1f),
                 )
-                TextButton(onClick = onPickApps) { Text("添加应用") }
+                TextButton(onClick = onPickApps, enabled = !lock.locked) { Text("添加应用") }
             }
             Spacer(Modifier.height(4.dp))
             if (members.isEmpty()) {
@@ -329,7 +357,10 @@ internal fun GroupDetailScreen(groupId: String, onBack: () -> Unit, onPickApps: 
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
-                    IconButton(onClick = { scope.launch { repo.assignApp(app.packageName, GroupIds.DEFAULT) } }) {
+                    IconButton(
+                        enabled = !lock.locked,
+                        onClick = { scope.launch { repo.assignApp(app.packageName, GroupIds.DEFAULT) } },
+                    ) {
                         Text("✕", fontSize = 18.sp)
                     }
                 }
@@ -339,6 +370,7 @@ internal fun GroupDetailScreen(groupId: String, onBack: () -> Unit, onPickApps: 
                 Spacer(Modifier.height(24.dp))
                 OutlinedButton(
                     onClick = { showDeleteDialog = true },
+                    enabled = !lock.locked,
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     Text("删除分组", color = MaterialTheme.colorScheme.error)
@@ -353,16 +385,54 @@ internal fun GroupDetailScreen(groupId: String, onBack: () -> Unit, onPickApps: 
             title = { Text("删除分组") },
             text = { Text("「${group.name}」将被删除，其中的应用将回归默认组。") },
             confirmButton = {
-                TextButton(onClick = {
-                    showDeleteDialog = false
-                    scope.launch {
-                        repo.deleteGroup(group.id)
-                        onBack()
-                    }
-                }) { Text("删除", color = MaterialTheme.colorScheme.error) }
+                TextButton(
+                    enabled = !lock.locked,
+                    onClick = {
+                        showDeleteDialog = false
+                        scope.launch {
+                            repo.deleteGroup(group.id)
+                            onBack()
+                        }
+                    },
+                ) { Text("删除", color = MaterialTheme.colorScheme.error) }
             },
             dismissButton = {
                 TextButton(onClick = { showDeleteDialog = false }) { Text("取消") }
+            },
+        )
+    }
+
+    // 保护提醒：为分组开启任一机制前的影响范围确认；默认组额外警示覆盖面
+    pendingMechanism?.let { mechanism ->
+        AlertDialog(
+            onDismissRequest = { pendingMechanism = null },
+            title = { Text("开启「${mechanismLabel(mechanism)}」") },
+            text = {
+                Column {
+                    Text("开启「${mechanismLabel(mechanism)}」后，本组的 ${members.size} 个应用将受到该机制约束。")
+                    if (group.kind == GroupKind.DEFAULT) {
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            "注意：默认组覆盖所有未分组的用户应用（当前共 ${members.size} 个），请确认不会误拦。",
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    pendingMechanism = null
+                    scope.launch {
+                        repo.updateConfig(
+                            group.id,
+                            group.config.copy(mechanisms = group.config.mechanisms + mechanism),
+                        )
+                    }
+                }) { Text("确认开启") }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingMechanism = null }) { Text("取消") }
             },
         )
     }

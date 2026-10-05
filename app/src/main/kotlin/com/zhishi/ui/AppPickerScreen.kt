@@ -57,6 +57,8 @@ internal fun AppPickerScreen(groupId: String, onBack: () -> Unit) {
     val groups by repo.groups.collectAsStateWithLifecycle(initialValue = emptyList())
     val showSystem by catalog.systemAppsVisible.collectAsStateWithLifecycle()
     LaunchedEffect(Unit) { catalog.ensureLoaded() }
+    // 自律锁：分配应用是配置写操作，锁定期间禁用
+    val lock = rememberDisciplineLockUi()
 
     var query by remember { mutableStateOf("") }
     val groupNameById = groups.associate { it.id to it.name }
@@ -80,6 +82,9 @@ internal fun AppPickerScreen(groupId: String, onBack: () -> Unit) {
         },
     ) { padding ->
         Column(Modifier.padding(padding).fillMaxSize()) {
+            if (lock.config != null && lock.locked) {
+                DisciplineLockBanner(lock.windowText)
+            }
             OutlinedTextField(
                 value = query,
                 onValueChange = { query = it },
@@ -112,7 +117,7 @@ internal fun AppPickerScreen(groupId: String, onBack: () -> Unit) {
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clickable {
+                            .clickable(enabled = !lock.locked) {
                                 scope.launch {
                                     repo.assignApp(
                                         app.packageName,
@@ -144,7 +149,9 @@ internal fun AppPickerScreen(groupId: String, onBack: () -> Unit) {
                         }
                         Checkbox(
                             checked = inThisGroup,
+                            enabled = !lock.locked,
                             onCheckedChange = { on ->
+                                if (lock.locked) return@Checkbox
                                 scope.launch {
                                     repo.assignApp(
                                         app.packageName,
