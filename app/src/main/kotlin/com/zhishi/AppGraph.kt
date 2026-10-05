@@ -6,6 +6,7 @@ import com.zhishi.data.GroupRepository
 import com.zhishi.detect.ForegroundMonitor
 import com.zhishi.guard.ExitAction
 import com.zhishi.guard.GuardCoordinator
+import com.zhishi.overlay.OverlayInteractions
 import com.zhishi.overlay.OverlayManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -31,7 +32,28 @@ object AppGraph {
     val groupRepository: GroupRepository by lazy { GroupRepository(appContext) }
     val appCatalog: AppCatalog by lazy { AppCatalog(appContext) }
     val exitAction: ExitAction by lazy { ExitAction(appContext) }
-    val overlayManager: OverlayManager by lazy { OverlayManager(appContext, exitAction) }
+
+    /**
+     * 浮层交互转发枢纽：OverlayManager 构造早于协调器，先以空实现兜底；
+     * 协调器构造完成时绑定自身（GuardCoordinator 实现了 OverlayInteractions）。
+     */
+    private val overlayInteractionsHub = object : OverlayInteractions {
+        @Volatile
+        private var delegate: OverlayInteractions = OverlayInteractions.NONE
+
+        fun bind(target: OverlayInteractions) {
+            delegate = target
+        }
+
+        override fun onDurationSelected(packageName: String, minutes: Int) =
+            delegate.onDurationSelected(packageName, minutes)
+
+        override fun onConfirmExit(packageName: String) = delegate.onConfirmExit(packageName)
+
+        override fun onExtensionRequested(packageName: String) = delegate.onExtensionRequested(packageName)
+    }
+
+    val overlayManager: OverlayManager by lazy { OverlayManager(appContext, overlayInteractionsHub) }
     val foregroundMonitor: ForegroundMonitor by lazy { ForegroundMonitor(appContext) }
 
     val coordinator: GuardCoordinator by lazy {
@@ -42,6 +64,6 @@ object AppGraph {
             exitAction = exitAction,
             repository = groupRepository,
             catalog = appCatalog,
-        )
+        ).also { overlayInteractionsHub.bind(it) }
     }
 }

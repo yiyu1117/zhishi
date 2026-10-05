@@ -20,6 +20,7 @@ import com.zhishi.data.GroupRepository
 import com.zhishi.data.GroupSnapshot
 import com.zhishi.detect.ForegroundApp
 import com.zhishi.detect.ForegroundMonitor
+import com.zhishi.overlay.OverlayInteractions
 import com.zhishi.overlay.OverlayManager
 import java.time.LocalDate
 import kotlinx.coroutines.CoroutineScope
@@ -35,7 +36,7 @@ import kotlinx.coroutines.launch
  * - 1 秒 ticker 派发 Tick，检测自然日切换派发 DayChanged；
  * - 前台事件来自 [ForegroundMonitor]，进后台时向原应用状态机派发 Backgrounded；
  * - 效果翻译：ShowOverlay/HideOverlay → 浮层、ShowToast → Toast、GoHome → 退出动作、FlushState → 记账（ticket 06/10）；
- * - 依据分组规则快照重建/热更新状态机（ticket 02 接线：黑名单语义）。
+ * - 依据分组规则快照重建/热更新状态机；实现 [OverlayInteractions] 接收浮层按钮回调并派发状态机事件。
  */
 class GuardCoordinator(
     private val appContext: Context,
@@ -44,7 +45,7 @@ class GuardCoordinator(
     private val exitAction: ExitAction,
     private val repository: GroupRepository,
     private val catalog: AppCatalog,
-) {
+) : OverlayInteractions {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
     private val machines = LinkedHashMap<String, GuardStateMachine>()
@@ -118,28 +119,29 @@ class GuardCoordinator(
         lastForeground = next
 
         if (prev != null && prev != next) {
-            val machine = machines[prev]
-            if (machine != null) {
-                translate(prev, machine.dispatch(GuardEvent.Backgrounded))
-            } else if (prev == SampleGuard.PACKAGE) {
-                // ticket 01 示例守护路径：离开示例应用时关闭演示浮层
-                overlayManager.hide(prev)
-            }
+            machines[prev]?.let { translate(prev, it.dispatch(GuardEvent.Backgrounded)) }
         }
 
         if (next == null) return
-        val machine = machines[next]
-        if (machine != null) {
-            translate(next, machine.dispatch(GuardEvent.ForegroundEntered))
-        } else if (next == SampleGuard.PACKAGE && rulesSnapshot?.assignments?.containsKey(next) != true) {
-            // ticket 01 示例守护应用（bootstrap 演示，不走状态机）；
-            // 用户把示例应用分配进任意分组后（ticket 02），交由分组规则接管，演示浮层不再出现
-            overlayManager.showSample(catalog.appName(next))
-        }
-        // 其余应用（非守护）绝不弹浮层
+        machines[next]?.let { translate(next, it.dispatch(GuardEvent.ForegroundEntered)) }
+        // 非守护应用（无状态机）绝不弹浮层
     }
 
     // endregion
+
+    // region 浮层交互回调（OverlayInteractions）
+
+    override fun onDurationSelected(packageName: String, minutes: Int) {
+        machines[packageName]?.let { translate(packageName, it.dispatch(GuardEvent.DurationSelected(minutes))) }
+    }
+
+    override fun onConfirmExit(packageName: String) {
+        machines[packageName]?.let { translate(packageName, it.dispatch(GuardEvent.ConfirmExit)) }
+    }
+
+    override fun onExtensionRequested(packageName: String) {
+        machines[packageName]?.let { translate(packageName, it.dispatch(GuardEvent.ExtensionRequested)) }
+    }
 
     // region 效果翻译
 
@@ -227,11 +229,15 @@ class GuardCoordinator(
     }
 
     /**
-     * 本票只接线黑名单语义（每日限额 -1）；白名单组完全豁免。
-     * 机制全关且无限额的应用不建状态机，其余机制由 ticket 03–07 的状态机落地后自动生效。
+     * 需要状态机的分组：黑名单（每日限额 -1）、任一机制开启、或每日限额 > 0（直接记账 + 限额中断）。
+     * 白名单完全豁免；机制全关且无限额不建实例（默认组兜底语义）。
      */
     private fun needsMachine(group: Group): Boolean =
-        group.kind != GroupKind.WHITELIST && group.config.isForbiddenByQuota()
+        group.kind != GroupKind.WHITELIST && (
+            group.config.isForbiddenByQuota() ||
+                group.config.mechanisms.isNotEmpty() ||
+                group.config.dailyLimitMinutes > 0
+            )
 
     private fun createMachine(pkg: String, config: GroupConfig) {
         if (machines.containsKey(pkg)) return

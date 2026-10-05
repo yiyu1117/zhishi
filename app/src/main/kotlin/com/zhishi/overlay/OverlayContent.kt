@@ -59,49 +59,19 @@ sealed interface OverlayContent {
         val remainingMillis: Long? = null,
         val appearanceEpoch: Long = 0L,
     ) : OverlayContent
-
-    /** ticket 01 示例守护应用演示浮层（不走状态机）。 */
-    data class Sample(val appName: String) : OverlayContent
 }
 
 @Composable
 internal fun OverlayRoot(
     contentState: StateFlow<OverlayContent?>,
     interactions: OverlayInteractions,
-    onSampleBackHome: () -> Unit,
 ) {
     val content by contentState.collectAsState()
     Box(Modifier.fillMaxSize().background(OverlayScrim)) {
         when (val c = content) {
             null -> Unit
-            is OverlayContent.Sample -> SampleOverlay(c.appName, onSampleBackHome)
             is OverlayContent.Machine -> MachineOverlay(c, interactions)
         }
-    }
-}
-
-/** ticket 01 演示浮层：示例守护应用 + 应用名 + 回桌面按钮（唯一允许直接执行退出动作的例外）。 */
-@Composable
-private fun SampleOverlay(appName: String, onBackHome: () -> Unit) {
-    Column(
-        modifier = Modifier.fillMaxSize().padding(32.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center,
-    ) {
-        Text("示例守护应用", fontSize = 34.sp, fontWeight = FontWeight.Bold, color = OnOverlay)
-        Spacer(Modifier.height(12.dp))
-        Text(appName, fontSize = 20.sp, color = OnOverlay.copy(alpha = 0.8f))
-        Spacer(Modifier.height(48.dp))
-        Button(onClick = onBackHome) {
-            Text("回桌面", fontSize = 18.sp)
-        }
-        Spacer(Modifier.height(24.dp))
-        Text(
-            "（ticket 01 演示：检测到示例应用进入前台）",
-            fontSize = 13.sp,
-            color = OnOverlay.copy(alpha = 0.5f),
-            textAlign = TextAlign.Center,
-        )
     }
 }
 

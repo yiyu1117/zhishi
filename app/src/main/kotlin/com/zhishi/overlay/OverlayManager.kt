@@ -11,8 +11,6 @@ import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import androidx.lifecycle.setViewTreeLifecycleOwner
 import androidx.lifecycle.setViewTreeViewModelStoreOwner
 import com.zhishi.core.machine.OverlaySpec
-import com.zhishi.guard.ExitAction
-import com.zhishi.guard.SampleGuard
 import kotlinx.coroutines.flow.MutableStateFlow
 
 /**
@@ -25,7 +23,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
  */
 class OverlayManager(
     private val appContext: Context,
-    private val exitAction: ExitAction,
     private val interactions: OverlayInteractions = OverlayInteractions.NONE,
 ) {
     private val windowManager = appContext.getSystemService(WindowManager::class.java)
@@ -46,14 +43,6 @@ class OverlayManager(
         if (!Settings.canDrawOverlays(appContext)) return
         currentPackage = packageName
         content.value = OverlayContent.Machine(packageName, appName, spec, remainingMillis, appearanceEpoch)
-        attachIfNeeded()
-    }
-
-    /** ticket 01 示例守护应用演示路径（不走状态机）。 */
-    fun showSample(appName: String) {
-        if (!Settings.canDrawOverlays(appContext)) return
-        currentPackage = SampleGuard.PACKAGE
-        content.value = OverlayContent.Sample(appName)
         attachIfNeeded()
     }
 
@@ -93,11 +82,7 @@ class OverlayManager(
             setViewTreeSavedStateRegistryOwner(owner)
             setContent {
                 MaterialTheme(colorScheme = darkColorScheme()) {
-                    OverlayRoot(content, interactions) {
-                        // 示例浮层"回桌面"：关浮层 + 退出动作（唯一直接执行退出动作的例外）
-                        exitAction.goToHome()
-                        hideAll()
-                    }
+                    OverlayRoot(content, interactions)
                 }
             }
         }
