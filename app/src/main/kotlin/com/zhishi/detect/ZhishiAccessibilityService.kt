@@ -48,8 +48,12 @@ class ZhishiAccessibilityService : AccessibilityService(), ForegroundDetector {
     override fun onUnbind(intent: Intent?): Boolean {
         bound.value = false
         instance = null
-        AppGraph.foregroundMonitor.detach()
-        AppGraph.coordinator.stop()
+        // 仅当无障碍 provider 仍是监视器属主时才拆线（模式可能已切到轮询，不得误拆）。
+        // 协调器不在此停止：其生命周期与进程一致，模式切换由协调器统一调度。
+        if (AppGraph.foregroundMonitor.currentDetector() === this) {
+            AppGraph.foregroundMonitor.detach()
+            AppGraph.foregroundMonitor.reset()
+        }
         return super.onUnbind(intent)
     }
 
@@ -69,6 +73,9 @@ class ZhishiAccessibilityService : AccessibilityService(), ForegroundDetector {
 
         /** ExitAction 判定用全局动作还是桌面 intent。 */
         val isConnected: Boolean get() = instance != null
+
+        /** 已连接的服务实例（协调器在轮询切回无障碍模式时重新 attach 用）。 */
+        fun boundInstance(): ZhishiAccessibilityService? = instance
 
         /** 执行全局回桌面动作；服务未连接时返回 false。 */
         fun performGlobalHome(): Boolean =

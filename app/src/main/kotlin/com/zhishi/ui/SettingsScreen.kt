@@ -191,6 +191,11 @@ internal fun SettingsScreen(onBack: () -> Unit) {
                         }
                     }
                 }
+                // 兼容模式授权与保活引导（ticket 09）
+                if (currentMode == DetectionMode.POLLING) {
+                    Spacer(Modifier.height(8.dp))
+                    PollingGuideCard()
+                }
             }
             // endregion
 

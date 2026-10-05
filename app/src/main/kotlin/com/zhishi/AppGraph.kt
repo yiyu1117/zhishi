@@ -3,6 +3,8 @@ package com.zhishi
 import android.content.Context
 import com.zhishi.data.AppCatalog
 import com.zhishi.data.GroupRepository
+import com.zhishi.data.SettingsRepository
+import com.zhishi.data.UsageLedger
 import com.zhishi.detect.ForegroundMonitor
 import com.zhishi.guard.ExitAction
 import com.zhishi.guard.GuardCoordinator
@@ -30,6 +32,8 @@ object AppGraph {
     }
 
     val groupRepository: GroupRepository by lazy { GroupRepository(appContext) }
+    val settingsRepository: SettingsRepository by lazy { SettingsRepository(appContext) }
+    val usageLedger: UsageLedger by lazy { UsageLedger(appContext) }
     val appCatalog: AppCatalog by lazy { AppCatalog(appContext) }
     val exitAction: ExitAction by lazy { ExitAction(appContext) }
 
@@ -64,6 +68,8 @@ object AppGraph {
             exitAction = exitAction,
             repository = groupRepository,
             catalog = appCatalog,
+            ledger = usageLedger,
+            settings = settingsRepository,
         ).also { overlayInteractionsHub.bind(it) }
     }
 }

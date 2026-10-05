@@ -17,4 +17,10 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+
+    override fun onStart() {
+        super.onStart()
+        // 协调器随进程常驻（幂等）：无障碍/轮询服务各自也会拉起，这里是设置页切模式时的兜底入口
+        AppGraph.coordinator.start()
+    }
 }

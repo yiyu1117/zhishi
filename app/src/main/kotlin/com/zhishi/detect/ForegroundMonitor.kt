@@ -90,6 +90,14 @@ class ForegroundMonitor(private val appContext: Context) {
         detector = null
     }
 
+    /** 当前已接入的检测实现；无障碍服务 onUnbind 据此判断自己是否仍是属主（避免误拆轮询 provider）。 */
+    fun currentDetector(): ForegroundDetector? = detector
+
+    /** 清空前台判定（如无障碍断开且无替代 provider）：经状态流触发协调器的退后台派发。 */
+    fun reset() {
+        _state.value = null
+    }
+
     private val listener = ForegroundListener { onDetectorEvent(it) }
 
     private fun onDetectorEvent(packageName: String?) {
