@@ -77,18 +77,27 @@ class GroupRepository(private val appContext: Context) {
         return all.firstOrNull { it.id == gid } ?: all.first()
     }
 
-    suspend fun createGroup(name: String): Group {
+    /** 新组由设置中的全局默认参数播种（时间参数 + 新组默认每日限额）。 */
+    suspend fun createGroup(
+        name: String,
+        seedTime: TimeParams = TimeParams(),
+        seedDailyLimitMinutes: Int = 0,
+    ): Group {
         val id = "custom-" + UUID.randomUUID().toString().substring(0, 8)
+        val seedConfig = GroupConfig(
+            mechanisms = emptySet(),
+            dailyLimitMinutes = seedDailyLimitMinutes,
+            time = seedTime,
+        )
         dataStore.edit { prefs ->
             val order = (prefs[CUSTOM_ORDER_KEY]?.split(',')?.filter { it.isNotBlank() } ?: emptyList()) + id
             prefs[CUSTOM_ORDER_KEY] = order.joinToString(",")
             prefs[nameKey(id)] = name
-            // 新组用 TimeParams() 默认值播种
-            prefs[timeKey(id)] = encodeTimeParams(TimeParams())
-            prefs[limitKey(id)] = 0
+            prefs[timeKey(id)] = encodeTimeParams(seedConfig.time)
+            prefs[limitKey(id)] = seedConfig.dailyLimitMinutes
             prefs[mechKey(id)] = ""
         }
-        return Group(id, name, GroupKind.CUSTOM, GroupConfig())
+        return Group(id, name, GroupKind.CUSTOM, seedConfig)
     }
 
     /** 删除自定义分组；内置组拒绝。成员回归默认组（移除分配键即回到兜底）。 */

@@ -53,6 +53,7 @@ import com.zhishi.AppGraph
 import com.zhishi.core.model.Group
 import com.zhishi.core.model.GroupKind
 import com.zhishi.core.model.Mechanism
+import com.zhishi.core.model.TimeParams
 import com.zhishi.data.AppCatalog
 import com.zhishi.data.GroupIds
 import kotlinx.coroutines.launch
@@ -62,12 +63,16 @@ import kotlinx.coroutines.launch
 @Composable
 internal fun GroupListScreen(onOpenGroup: (String) -> Unit, onOpenSettings: () -> Unit) {
     val repo = AppGraph.groupRepository
+    val settings = rememberSettingsRepository()
     val scope = rememberCoroutineScope()
     val groups by repo.groups.collectAsStateWithLifecycle(initialValue = emptyList())
     val assignments by repo.assignments.collectAsStateWithLifecycle(initialValue = emptyMap())
     val apps by AppGraph.appCatalog.apps.collectAsStateWithLifecycle(initialValue = emptyList())
     LaunchedEffect(Unit) { AppGraph.appCatalog.ensureLoaded() }
     val lock = rememberDisciplineLockUi()
+    // 新分组用设置中的全局默认参数播种
+    val seedTime by settings.defaultTimeParams.collectAsStateWithLifecycle(initialValue = TimeParams())
+    val seedLimit by settings.newGroupDailyLimitMinutes.collectAsStateWithLifecycle(initialValue = 0)
 
     var showCreateDialog by remember { mutableStateOf(false) }
     var newGroupName by remember { mutableStateOf("") }
@@ -138,7 +143,9 @@ internal fun GroupListScreen(onOpenGroup: (String) -> Unit, onOpenSettings: () -
                     onClick = {
                         val name = newGroupName.trim()
                         showCreateDialog = false
-                        if (name.isNotEmpty()) scope.launch { repo.createGroup(name) }
+                        if (name.isNotEmpty()) scope.launch {
+                            repo.createGroup(name, seedTime = seedTime, seedDailyLimitMinutes = seedLimit)
+                        }
                     },
                 ) { Text("创建") }
             },
