@@ -5,6 +5,7 @@ import android.graphics.PixelFormat
 import android.provider.Settings
 import android.view.WindowManager
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.darkColorScheme
 import androidx.compose.ui.platform.ComposeView
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import androidx.lifecycle.setViewTreeLifecycleOwner
@@ -18,10 +19,14 @@ import kotlinx.coroutines.flow.MutableStateFlow
  * 拦截浮层管理器：TYPE_APPLICATION_OVERLAY 全屏悬浮窗承载 ComposeView。
  * 同一时刻只显示一个浮层（最新守护前台应用）；FLAG_NOT_FOCUSABLE 保证系统手势仍可用，
  * 用户永远能回到桌面 —— 防锁死底线。
+ *
+ * @param interactions 浮层按钮交互回调（快选/确定/延时），由协调器接线；
+ *   默认空实现保证不接线也编译通过、按钮点击静默忽略。
  */
 class OverlayManager(
     private val appContext: Context,
     private val exitAction: ExitAction,
+    private val interactions: OverlayInteractions = OverlayInteractions.NONE,
 ) {
     private val windowManager = appContext.getSystemService(WindowManager::class.java)
     private val content = MutableStateFlow<OverlayContent?>(null)
@@ -30,11 +35,17 @@ class OverlayManager(
     private var composeView: ComposeView? = null
     private var lifecycleOwner: OverlayLifecycleOwner? = null
 
+    /**
+     * 浮层出现纪元：每次实际隐藏后递增。作为浮层内容身份键的一部分，
+     * 让按钮保护计时与"浮层出现"绑定 —— 同一形态持续刷新不重置，隐藏重现则重新计时。
+     */
+    private var appearanceEpoch = 0L
+
     /** 状态机路径：显示/刷新浮层。 */
     fun show(packageName: String, appName: String, spec: OverlaySpec, remainingMillis: Long? = null) {
         if (!Settings.canDrawOverlays(appContext)) return
         currentPackage = packageName
-        content.value = OverlayContent.Machine(packageName, appName, spec, remainingMillis)
+        content.value = OverlayContent.Machine(packageName, appName, spec, remainingMillis, appearanceEpoch)
         attachIfNeeded()
     }
 
@@ -51,6 +62,7 @@ class OverlayManager(
         if (packageName != null && currentPackage != packageName) return
         currentPackage = null
         content.value = null
+        appearanceEpoch++ // 隐藏重现须重新计时（保护计时绑定"浮层出现"）
         detach()
     }
 
@@ -80,9 +92,9 @@ class OverlayManager(
             setViewTreeViewModelStoreOwner(owner)
             setViewTreeSavedStateRegistryOwner(owner)
             setContent {
-                MaterialTheme {
-                    OverlayRoot(content) {
-                        // 示例浮层"回桌面"：关浮层 + 退出动作
+                MaterialTheme(colorScheme = darkColorScheme()) {
+                    OverlayRoot(content, interactions) {
+                        // 示例浮层"回桌面"：关浮层 + 退出动作（唯一直接执行退出动作的例外）
                         exitAction.goToHome()
                         hideAll()
                     }
