@@ -1,8 +1,21 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+
+    <!-- ticket 09 兼容模式（UsageStats 轮询）追加权限 -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- 引导卡申请电池优化豁免（ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS）所需 -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <!-- 使用情况访问为 AppOps 授权（设置页手动授予）；声明此权限保证部分 ROM 的授权入口会列出本应用 -->
+    <uses-permission
+        android:name="android.permission.PACKAGE_USAGE_STATS"
+        tools:ignore="ProtectedPermissions" />
 
     <application
         android:name=".ZhishiApp"
@@ -35,5 +48,25 @@
                 android:name="android.accessibilityservice"
                 android:resource="@xml/accessibility_service_config" />
         </service>
+
+        <!-- 兼容模式前台守护服务（UsageStats 轮询，ticket 09）。specialUse 说明 property 为 API 34+ 要求。 -->
+        <service
+            android:name=".detect.PollingForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="防沉迷守护：以 UsageStats 轮询感知前台应用切换并施加拦截浮层，需常驻保活以防守护被系统休眠中断" />
+        </service>
+
+        <!-- 开机自启：BOOT_COMPLETED 为系统保护广播（仅系统可发送），exported=true 不会被第三方滥用 -->
+        <receiver
+            android:name=".detect.BootReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>

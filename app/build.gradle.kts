@@ -15,10 +15,22 @@ android {
         versionName = "1.0.0"
     }
 
+    signingConfigs {
+        create("release") {
+            // 开源侧载项目：keystore 随仓库分发、口令公开（README「发布」节有说明），
+            // 保证任何人都能构建出可安装的 release 包；使用者也可自行替换。
+            storeFile = rootProject.file("keystore/***REMOVED***.keystore")
+            storePassword = "***REMOVED***"
+            keyAlias = "zhishi"
+            keyPassword = "***REMOVED***"
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = true
             isShrinkResources = true
+            signingConfig = signingConfigs.getByName("release")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
