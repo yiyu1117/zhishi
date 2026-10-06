@@ -11,3 +11,7 @@ captures/
 *.apk
 *.aab
 !gradle/wrapper/gradle-wrapper.jar
+
+# 本地临时与工作草稿
+tmp/
+.scratch/
