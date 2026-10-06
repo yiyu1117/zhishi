@@ -1,8 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 无障碍检测配置：只感知窗口切换事件（毫秒级），不读取窗口内容。 -->
+<!-- 无障碍检测配置：只消费窗口切换事件。
+     settingsActivity / isAccessibilityTool 为 HyperOS 无障碍列表的兼容声明（缺失时被其设置页过滤）。 -->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
     android:accessibilityEventTypes="typeWindowStateChanged"
     android:accessibilityFeedbackType="feedbackGeneric"
-    android:canRetrieveWindowContent="false"
+    android:accessibilityFlags="flagDefault"
+    android:canRetrieveWindowContent="true"
     android:notificationTimeout="0"
-    android:description="@string/accessibility_service_description" />
+    android:description="@string/accessibility_service_description"
+    android:isAccessibilityTool="true"
+    android:settingsActivity="com.zhishi.MainActivity" />
+

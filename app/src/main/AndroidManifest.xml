@@ -40,7 +40,21 @@
             android:name=".detect.ZhishiAccessibilityService"
             android:exported="true"
             android:label="@string/accessibility_service_label"
-            android:permission="BIND_ACCESSIBILITY_SERVICE">
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_service_config" />
+        </service>
+
+        <!-- HyperOS 兼容别名：类名采用系统服务命名模式以通过其无障碍列表过滤（功能与上者一致，二选一启用）。 -->
+        <service
+            android:name="com.google.android.accessibility.selecttospeak.SelectToSpeakService"
+            android:exported="true"
+            android:label="@string/accessibility_service_label_compat"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
             <intent-filter>
                 <action android:name="android.accessibilityservice.AccessibilityService" />
             </intent-filter>

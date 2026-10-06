@@ -16,7 +16,7 @@ import kotlinx.coroutines.flow.asStateFlow
  * 只消费 TYPE_WINDOW_STATE_CHANGED 事件里的包名（canRetrieveWindowContent=false），
  * 通过 [ForegroundDetector] 契约喂给 [ForegroundMonitor]。
  */
-class ZhishiAccessibilityService : AccessibilityService(), ForegroundDetector {
+open class ZhishiAccessibilityService : AccessibilityService(), ForegroundDetector {
 
     private var listener: ForegroundListener? = null
 
