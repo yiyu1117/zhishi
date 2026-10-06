@@ -62,11 +62,17 @@ class PollingForegroundService : LifecycleService() {
     }
 
     override fun onDestroy() {
-        detector?.stop()
+        val d = detector
         detector = null
+        d?.stop()
         if (wired) {
             wired = false
-            AppGraph.foregroundMonitor.detach()
+            // 仅当监视器属主仍是本服务的轮询实现时才拆线。模式切到无障碍时协调器会立即
+            // attach 回无障碍 provider，而 stopService 的 onDestroy 异步晚于该 attach，
+            // 无条件拆线会把刚接好的无障碍 provider 拆掉，无障碍模式从此收不到前台事件。
+            if (AppGraph.foregroundMonitor.currentDetector() === d) {
+                AppGraph.foregroundMonitor.detach()
+            }
         }
         super.onDestroy()
     }
