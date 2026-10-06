@@ -56,6 +56,9 @@ class SettingsRepository(private val appContext: Context) {
     /** 调试模式：以小悬浮窗显示全部状态机实时状态（排查拦截/计时问题用），默认关。 */
     val debugMode: Flow<Boolean> = dataStore.data.map { it[DEBUG_MODE_KEY] ?: false }
 
+    /** 调试工具悬浮窗（重置计时/注入状态/查看日志），默认关。 */
+    val debugToolsEnabled: Flow<Boolean> = dataStore.data.map { it[DEBUG_TOOLS_KEY] ?: false }
+
     val settings: Flow<SettingsSnapshot> = combine(
         defaultTimeParams,
         newGroupDailyLimitMinutes,
@@ -111,6 +114,10 @@ class SettingsRepository(private val appContext: Context) {
 
     suspend fun setDebugMode(enabled: Boolean) {
         dataStore.edit { it[DEBUG_MODE_KEY] = enabled }
+    }
+
+    suspend fun setDebugToolsEnabled(enabled: Boolean) {
+        dataStore.edit { it[DEBUG_TOOLS_KEY] = enabled }
     }
 
     // region 解码 / 编码
@@ -194,5 +201,6 @@ class SettingsRepository(private val appContext: Context) {
         val DETECTION_MODE_KEY = stringPreferencesKey("detection.mode")
         val KEEP_ALIVE_DISMISSED_KEY = booleanPreferencesKey("guide.keepAlive.dismissed")
         val DEBUG_MODE_KEY = booleanPreferencesKey("debug.overlay.enabled")
+        val DEBUG_TOOLS_KEY = booleanPreferencesKey("debug.tools.enabled")
     }
 }

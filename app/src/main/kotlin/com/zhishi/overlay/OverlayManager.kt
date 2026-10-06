@@ -12,6 +12,7 @@ import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import androidx.lifecycle.setViewTreeLifecycleOwner
 import androidx.lifecycle.setViewTreeViewModelStoreOwner
 import com.zhishi.core.machine.OverlaySpec
+import com.zhishi.log.AppLog
 import kotlinx.coroutines.flow.MutableStateFlow
 
 /**
@@ -62,6 +63,7 @@ class OverlayManager(
         }
         currentPackage = packageName
         Log.d(TAG, "overlay show pkg=$packageName spec=${spec::class.simpleName}")
+        AppLog.d(TAG, "浮层显示 pkg=$packageName 形态=${spec::class.simpleName}")
         content.value = OverlayContent.Machine(packageName, appName, spec, remainingMillis, appearanceEpoch)
         attachIfNeeded()
     }
@@ -74,6 +76,7 @@ class OverlayManager(
         content.value = null
         appearanceEpoch++ // 隐藏重现须重新计时（保护计时绑定"浮层出现"）
         if (detach() && detachedPkg != null) {
+            AppLog.d(TAG, "浮层隐藏 pkg=$detachedPkg")
             onVisibilityChanged?.invoke(detachedPkg, false)
         }
     }

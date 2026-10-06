@@ -105,7 +105,8 @@ class DefaultGuardStateMachine(
 
     /**
      * 事件补偿：把当前状态的时间规则推进到 now，返回迁移产生的效果。
-     * 前台消耗态仅在用户处于前台时消耗；冷却仅当用户不在应用内时推进。
+     * 前台消耗态仅在用户处于前台时消耗；冷却与宽限仅当用户不在应用内时推进
+     * （宽限的防线防止异常滞留 GRACE 时被 Tick 悄悄耗尽判成中途放弃）。
      */
     private fun compensate(now: Long): List<GuardEffect> {
         val elapsed = now - lastProcessedMillis
@@ -114,7 +115,7 @@ class DefaultGuardStateMachine(
             GuardState.RUNNING -> consumeSession(elapsed)
             GuardState.EXTENSION_RUNNING -> consumeExtension(elapsed)
             GuardState.DIRECT_RUNNING -> consumeDirect(elapsed)
-            GuardState.GRACE -> advanceGrace(elapsed)
+            GuardState.GRACE -> if (!inForeground) advanceGrace(elapsed) else emptyList()
             GuardState.EXPIRY_COOLDOWN, GuardState.ABANDON_COOLDOWN ->
                 if (!inForeground) advanceCooldown(elapsed) else emptyList()
             else -> emptyList()
@@ -649,8 +650,53 @@ class DefaultGuardStateMachine(
         else -> GuardStateData(kind = state, extensionUsed = extensionUsed)
     }
 
-    override fun onConfigUpdated(newConfig: GroupConfig) {
-        config = newConfig
+    /**
+     * 调试注入（仅调试工具调用，正常事件流不走此路径）：强制切换到 [state]，
+     * [remainingMillis] 作为该状态的活动剩余（宽限/冷却/会话/延时；状态无倒计时时忽略）。
+     */
+    override fun debugInject(state: GuardState, remainingMillis: Long?) {
+        lastProcessedMillis = clock.nowMillis()
+        when (state) {
+            GuardState.INACTIVE -> {
+                toInactive()
+                inForeground = false
+            }
+            GuardState.RUNNING -> {
+                this.state = GuardState.RUNNING
+                sessionRemainingMillis = (remainingMillis ?: 0L).coerceAtLeast(0L)
+                firedReminderMarks.clear()
+                deferredUsageToasts.clear()
+            }
+            GuardState.GRACE -> {
+                this.state = GuardState.GRACE
+                graceRemainingMillis = (remainingMillis ?: 0L).coerceAtLeast(0L)
+            }
+            GuardState.EXTENSION_RUNNING -> {
+                this.state = GuardState.EXTENSION_RUNNING
+                extensionRemainingMillis = (remainingMillis ?: 0L).coerceAtLeast(0L)
+                extensionUsed = true
+                pendingCooldownKind = null
+                pendingCooldownRemainingMillis = 0L
+            }
+            GuardState.EXPIRY_COOLDOWN, GuardState.ABANDON_COOLDOWN -> {
+                this.state = state
+                cooldownKind = if (state == GuardState.EXPIRY_COOLDOWN) CooldownKind.EXPIRY else CooldownKind.ABANDON
+                cooldownRemainingMillis = (remainingMillis ?: 0L).coerceAtLeast(0L)
+            }
+            GuardState.TIME_UP -> {
+                this.state = GuardState.TIME_UP
+                currentOverlay = timeUpOverlay()
+            }
+            GuardState.AWAITING_SELECTION -> {
+                this.state = GuardState.AWAITING_SELECTION
+                currentOverlay = timeSelectionOverlay()
+            }
+            else -> Unit
+        }
+        publishSnapshot()
+    }
+
+    override fun onConfigUpdated(newConfig: GroupConfig) {        config = newConfig
         if (newConfig.isForbiddenByQuota()) {
             if (state != GuardState.BLACKLISTED) {
                 // 分组语义切换为平禁（每日限额 = -1）：黑名单无会话/冷却语义，全部作废

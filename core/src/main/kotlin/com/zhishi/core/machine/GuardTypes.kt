@@ -181,4 +181,10 @@ abstract class GuardStateMachine(
 
     /** 导出可持久化状态。 */
     abstract fun exportState(): GuardStateData
+
+    /**
+     * 调试注入（仅调试工具调用，正常事件流不走此路径）：强制切换到 [state]，
+     * [remainingMillis] 作为该状态的活动剩余（状态无倒计时时忽略）。
+     */
+    abstract fun debugInject(state: GuardState, remainingMillis: Long?)
 }

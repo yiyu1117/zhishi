@@ -6,8 +6,8 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.os.PowerManager
-import android.util.Log
 import androidx.core.content.ContextCompat
+import com.zhishi.log.AppLog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -116,7 +116,7 @@ class ForegroundMonitor(private val appContext: Context) {
 
     private fun onDetectorEvent(packageName: String?) {
         if (!screenOn) {
-            Log.d(TAG, "drop pkg=$packageName (screen off)")
+            AppLog.d(TAG, "丢弃事件 pkg=$packageName（息屏）")
             return
         }
         if (packageName == null) {
@@ -125,15 +125,15 @@ class ForegroundMonitor(private val appContext: Context) {
             return
         }
         if (packageName == appContext.packageName) {
-            Log.d(TAG, "drop pkg=$packageName (self window)") // 本 APP 自身（含浮层窗口）不改变前台判定
+            AppLog.d(TAG, "丢弃事件 pkg=$packageName（本应用窗口）")
             return
         }
         if (packageName in transientPackages) {
-            Log.d(TAG, "drop pkg=$packageName (transient)") // 系统 UI / 输入法瞬态窗口
+            AppLog.d(TAG, "丢弃事件 pkg=$packageName（瞬态窗口）")
             return
         }
         if (_state.value?.packageName == packageName) return // 去重（高频，不落日志）
-        Log.d(TAG, "foreground -> $packageName")
+        AppLog.d(TAG, "前台事件 -> $packageName")
         _state.value = ForegroundApp(packageName, System.currentTimeMillis())
     }
 
@@ -145,7 +145,7 @@ class ForegroundMonitor(private val appContext: Context) {
         }
         val filtered = packages.filterTo(HashSet()) { it != appContext.packageName && it !in transientPackages }
         if (filtered == _visiblePackages.value) return // 去重（每个窗口事件都扫描）
-        Log.d(TAG, "visible windows -> $filtered")
+        AppLog.d(TAG, "可见窗口 -> $filtered")
         _visiblePackages.value = filtered
     }
 

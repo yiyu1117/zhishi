@@ -2,6 +2,7 @@
 
 package com.zhishi.ui
 
+import android.widget.Toast
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -20,6 +21,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -46,7 +48,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.zhishi.AppGraph
 import com.zhishi.core.model.DetectionMode
 import com.zhishi.data.SettingsRepository
 import kotlinx.coroutines.launch
@@ -65,6 +69,8 @@ internal fun SettingsScreen(onBack: () -> Unit) {
     val mode by repo.detectionMode.collectAsStateWithLifecycle(initialValue = null)
     val newGroupLimit by repo.newGroupDailyLimitMinutes.collectAsStateWithLifecycle(initialValue = null)
     val debugMode by repo.debugMode.collectAsStateWithLifecycle(initialValue = false)
+    val debugTools by repo.debugToolsEnabled.collectAsStateWithLifecycle(initialValue = false)
+    val context = LocalContext.current
 
     var editRequest by remember { mutableStateOf<NumberEditRequest?>(null) }
     var editingStart by remember { mutableStateOf(false) }
@@ -196,31 +202,6 @@ internal fun SettingsScreen(onBack: () -> Unit) {
                 if (currentMode == DetectionMode.POLLING) {
                     Spacer(Modifier.height(8.dp))
                     PollingGuideCard()
-                }
-            }
-            // endregion
-
-            // region 调试模式
-            SettingsSection(title = "调试模式") {
-                Row(
-                    Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Column(Modifier.weight(1f)) {
-                        Text("状态调试悬浮窗", style = MaterialTheme.typography.bodyLarge)
-                        Text(
-                            "在屏幕角落以小悬浮窗列出全部守护应用的实时状态与倒计时" +
-                                "（会话/宽限/延时/冷却，支持多应用），用于排查拦截与计时问题；" +
-                                "悬浮窗不可触摸、不影响任何操作。",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                    Switch(
-                        checked = debugMode,
-                        enabled = !lock.locked,
-                        onCheckedChange = { on -> scope.launch { repo.setDebugMode(on) } },
-                    )
                 }
             }
             // endregion
@@ -388,6 +369,60 @@ internal fun SettingsScreen(onBack: () -> Unit) {
                         }
                     },
                 )
+            }
+            // endregion
+
+            // region 调试模式（置于最底，排查用）
+            SettingsSection(title = "调试模式") {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("状态调试悬浮窗", style = MaterialTheme.typography.bodyLarge)
+                        Text(
+                            "屏幕角落的小悬浮窗实时列出全部守护应用的状态与倒计时" +
+                                "（会话/宽限/延时/冷却，支持多应用）；不可触摸、不影响操作。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(
+                        checked = debugMode,
+                        enabled = !lock.locked,
+                        onCheckedChange = { on -> scope.launch { repo.setDebugMode(on) } },
+                    )
+                }
+                Spacer(Modifier.height(2.dp))
+                Row(
+                    Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("调试工具悬浮窗", style = MaterialTheme.typography.bodyLarge)
+                        Text(
+                            "可点按的小悬浮窗：重置所有计时、按应用注入指定状态与时间、" +
+                                "查看/复制应用内日志，方便不等冷却直接测试。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(
+                        checked = debugTools,
+                        enabled = !lock.locked,
+                        onCheckedChange = { on -> scope.launch { repo.setDebugToolsEnabled(on) } },
+                    )
+                }
+                Spacer(Modifier.height(2.dp))
+                Button(
+                    onClick = {
+                        AppGraph.coordinator.resetAllMachines()
+                        Toast.makeText(context, "已重置所有计时（会话/冷却/当日累计）", Toast.LENGTH_SHORT).show()
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("重置所有计时", fontSize = 15.sp)
+                }
             }
             // endregion
         }

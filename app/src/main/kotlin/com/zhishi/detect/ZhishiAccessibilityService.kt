@@ -9,6 +9,7 @@ import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import com.google.android.accessibility.selecttospeak.SelectToSpeakService
 import com.zhishi.AppGraph
+import com.zhishi.log.AppLog
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -43,7 +44,7 @@ open class ZhishiAccessibilityService : AccessibilityService(), ForegroundDetect
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null || event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
         val pkg = event.packageName?.toString() ?: return
-        Log.d(TAG, "a11y event pkg=$pkg")
+        AppLog.d(TAG, "窗口事件 pkg=$pkg")
         listener?.onForegroundChanged(pkg)
         scanVisibleWindows()
     }
