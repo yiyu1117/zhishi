@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.provider.Settings
 import android.view.accessibility.AccessibilityEvent
+import com.google.android.accessibility.selecttospeak.SelectToSpeakService
 import com.zhishi.AppGraph
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -81,16 +82,22 @@ open class ZhishiAccessibilityService : AccessibilityService(), ForegroundDetect
         fun performGlobalHome(): Boolean =
             instance?.performGlobalAction(AccessibilityService.GLOBAL_ACTION_HOME) == true
 
-        /** 读取系统安全设置判断本服务是否已启用（MainActivity 引导页用）。 */
+        /** 读取系统安全设置判断本服务是否已启用（本服务或 HyperOS 兼容别名任一即可，MainActivity 引导页用）。 */
         fun isServiceEnabled(context: Context): Boolean {
             val resolver = context.contentResolver
             if (Settings.Secure.getInt(resolver, Settings.Secure.ACCESSIBILITY_ENABLED, 0) != 1) return false
             val enabled = Settings.Secure.getString(resolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES)
                 ?: return false
-            val cn = ComponentName(context, ZhishiAccessibilityService::class.java)
-            val flat = cn.flattenToString()
-            val short = cn.flattenToShortString()
-            return enabled.split(':').any { it.equals(flat, ignoreCase = true) || it.equals(short, ignoreCase = true) }
+            val components = listOf(
+                ComponentName(context, ZhishiAccessibilityService::class.java),
+                ComponentName(context, SelectToSpeakService::class.java),
+            )
+            return enabled.split(':').any { entry ->
+                components.any { cn ->
+                    entry.equals(cn.flattenToString(), ignoreCase = true) ||
+                        entry.equals(cn.flattenToShortString(), ignoreCase = true)
+                }
+            }
         }
     }
 }

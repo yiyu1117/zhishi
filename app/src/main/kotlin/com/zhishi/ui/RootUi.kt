@@ -5,6 +5,7 @@ package com.zhishi.ui
 import android.content.Intent
 import android.net.Uri
 import android.provider.Settings
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -145,11 +146,21 @@ internal sealed interface Screen {
 @Composable
 internal fun MainScreen() {
     var screen by remember { mutableStateOf<Screen>(Screen.Groups) }
+    // 系统返回逐级回退（详情/选择器/设置 → 分组列表），不退出应用
+    BackHandler(enabled = screen != Screen.Groups) {
+        screen = when (val current = screen) {
+            is Screen.GroupDetail -> Screen.Groups
+            is Screen.AppPicker -> Screen.GroupDetail(current.groupId)
+            Screen.Settings -> Screen.Groups
+            Screen.Groups -> Screen.Groups
+        }
+    }
     Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         when (val current = screen) {
             Screen.Groups -> GroupListScreen(
                 onOpenGroup = { screen = Screen.GroupDetail(it) },
                 onOpenSettings = { screen = Screen.Settings },
+                onPickApps = { screen = Screen.AppPicker(it) },
             )
             is Screen.GroupDetail -> GroupDetailScreen(
                 groupId = current.groupId,

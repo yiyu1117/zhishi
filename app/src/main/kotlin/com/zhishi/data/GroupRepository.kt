@@ -77,7 +77,10 @@ class GroupRepository(private val appContext: Context) {
         return all.firstOrNull { it.id == gid } ?: all.first()
     }
 
-    /** 新组由设置中的全局默认参数播种（时间参数 + 新组默认每日限额）。 */
+    /**
+     * 新组由设置中的全局默认参数播种（时间参数 + 新组默认每日限额）；
+     * 六项机制默认全开（分组配置新建即管控，避免「加了应用却不拦截」的空配置组）。
+     */
     suspend fun createGroup(
         name: String,
         seedTime: TimeParams = TimeParams(),
@@ -85,7 +88,7 @@ class GroupRepository(private val appContext: Context) {
     ): Group {
         val id = "custom-" + UUID.randomUUID().toString().substring(0, 8)
         val seedConfig = GroupConfig(
-            mechanisms = emptySet(),
+            mechanisms = Mechanism.entries.toSet(),
             dailyLimitMinutes = seedDailyLimitMinutes,
             time = seedTime,
         )
@@ -95,7 +98,7 @@ class GroupRepository(private val appContext: Context) {
             prefs[nameKey(id)] = name
             prefs[timeKey(id)] = encodeTimeParams(seedConfig.time)
             prefs[limitKey(id)] = seedConfig.dailyLimitMinutes
-            prefs[mechKey(id)] = ""
+            prefs[mechKey(id)] = seedConfig.mechanisms.joinToString(",") { it.ordinal.toString() }
         }
         return Group(id, name, GroupKind.CUSTOM, seedConfig)
     }

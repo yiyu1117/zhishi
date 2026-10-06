@@ -61,7 +61,11 @@ import kotlinx.coroutines.launch
 // region 分组列表
 
 @Composable
-internal fun GroupListScreen(onOpenGroup: (String) -> Unit, onOpenSettings: () -> Unit) {
+internal fun GroupListScreen(
+    onOpenGroup: (String) -> Unit,
+    onOpenSettings: () -> Unit,
+    onPickApps: (String) -> Unit,
+) {
     val repo = AppGraph.groupRepository
     val settings = rememberSettingsRepository()
     val scope = rememberCoroutineScope()
@@ -118,6 +122,7 @@ internal fun GroupListScreen(onOpenGroup: (String) -> Unit, onOpenSettings: () -
                             group = group,
                             memberCount = memberCount(group, assignments, apps),
                             onClick = { onOpenGroup(group.id) },
+                            onPickApps = { onPickApps(group.id) },
                         )
                     }
                 }
@@ -157,7 +162,7 @@ internal fun GroupListScreen(onOpenGroup: (String) -> Unit, onOpenSettings: () -
 }
 
 @Composable
-private fun GroupCard(group: Group, memberCount: Int, onClick: () -> Unit) {
+private fun GroupCard(group: Group, memberCount: Int, onClick: () -> Unit, onPickApps: () -> Unit) {
     Card(onClick = onClick, modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -169,11 +174,16 @@ private fun GroupCard(group: Group, memberCount: Int, onClick: () -> Unit) {
                 KindBadge(group.kind)
             }
             Spacer(Modifier.height(4.dp))
-            Text(
-                "$memberCount 个应用",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "$memberCount 个应用",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1f),
+                )
+                // 添加应用独立入口：在分组列表上直接进选择器，不必先进配置页
+                TextButton(onClick = onPickApps) { Text("添加应用") }
+            }
         }
     }
 }
@@ -299,8 +309,16 @@ internal fun GroupDetailScreen(groupId: String, onBack: () -> Unit, onPickApps: 
                                 onCheckedChange = { on ->
                                     if (lock.locked) return@Switch
                                     if (on) {
-                                        // 保护提醒：开启前确认影响范围
-                                        pendingMechanism = mechanism
+                                        // 保护提醒：影响范围大（兜底所有未分组应用）的默认组才需确认；
+                                        // 自定义组开关直接生效
+                                        if (group.kind == GroupKind.DEFAULT) {
+                                            pendingMechanism = mechanism
+                                        } else {
+                                            scope.launch {
+                                                val next = group.config.mechanisms + mechanism
+                                                repo.updateConfig(group.id, group.config.copy(mechanisms = next))
+                                            }
+                                        }
                                     } else {
                                         scope.launch {
                                             val next = group.config.mechanisms - mechanism
@@ -413,7 +431,7 @@ internal fun GroupDetailScreen(groupId: String, onBack: () -> Unit, onPickApps: 
         )
     }
 
-    // 保护提醒：为分组开启任一机制前的影响范围确认；默认组额外警示覆盖面
+    // 保护提醒：为默认组开启机制前的影响范围确认（其他组不弹，开关直接生效）
     pendingMechanism?.let { mechanism ->
         AlertDialog(
             onDismissRequest = { pendingMechanism = null },
@@ -421,14 +439,12 @@ internal fun GroupDetailScreen(groupId: String, onBack: () -> Unit, onPickApps: 
             text = {
                 Column {
                     Text("开启「${mechanismLabel(mechanism)}」后，本组的 ${members.size} 个应用将受到该机制约束。")
-                    if (group.kind == GroupKind.DEFAULT) {
-                        Spacer(Modifier.height(8.dp))
-                        Text(
-                            "注意：默认组覆盖所有未分组的用户应用（当前共 ${members.size} 个），请确认不会误拦。",
-                            color = MaterialTheme.colorScheme.error,
-                            style = MaterialTheme.typography.bodyMedium,
-                        )
-                    }
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "注意：默认组覆盖所有未分组的用户应用（当前共 ${members.size} 个），请确认不会误拦。",
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
                 }
             },
             confirmButton = {
