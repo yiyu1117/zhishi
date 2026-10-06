@@ -2,6 +2,7 @@ package com.zhishi.guard
 
 import android.content.Context
 import android.content.Intent
+import android.util.Log
 import android.widget.Toast
 import androidx.core.content.ContextCompat
 import com.zhishi.core.machine.DefaultGuardStateMachine
@@ -177,6 +178,7 @@ class GuardCoordinator(
         }
 
         if (next == null) return
+        Log.d(TAG, "dispatch ForegroundEntered pkg=$next machine=${machines.containsKey(next)}")
         machines[next]?.let { translate(next, it.dispatch(GuardEvent.ForegroundEntered)) }
         // 非守护应用（无状态机）绝不弹浮层
     }
@@ -346,6 +348,7 @@ class GuardCoordinator(
 
     private fun createMachine(pkg: String, config: GroupConfig) {
         if (machines.containsKey(pkg)) return
+        Log.d(TAG, "machine+ pkg=$pkg mechanisms=${config.mechanisms} dailyLimit=${config.dailyLimitMinutes}")
         val restored = restoredStates[pkg] // 恢复数据消费一次：换组重建不得复用旧状态
         if (restored != null) restoredStates = restoredStates - pkg
         val machine = DefaultGuardStateMachine(
@@ -368,6 +371,7 @@ class GuardCoordinator(
 
     private fun removeMachine(pkg: String) {
         val machine = machines[pkg] ?: return
+        Log.d(TAG, "machine- pkg=$pkg")
         // 摘除前先落盘当日累计（分组切换语义下随后清除会话/冷却状态）
         val day = todayIso()
         val usedToday = machine.snapshot.value.usedTodayMillis
@@ -390,6 +394,7 @@ class GuardCoordinator(
     // endregion
 
     private companion object {
+        const val TAG = "ZhishiGuard"
         const val TICK_MILLIS = 1_000L
 
         /** 记账节流周期（tick 数）：约每 10 秒全量落盘一次，状态切换时另有即时落盘。 */

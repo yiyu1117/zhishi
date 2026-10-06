@@ -6,6 +6,7 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.os.PowerManager
+import android.util.Log
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -101,15 +102,25 @@ class ForegroundMonitor(private val appContext: Context) {
     private val listener = ForegroundListener { onDetectorEvent(it) }
 
     private fun onDetectorEvent(packageName: String?) {
-        if (!screenOn) return
+        if (!screenOn) {
+            Log.d(TAG, "drop pkg=$packageName (screen off)")
+            return
+        }
         if (packageName == null) {
             // 检测实现显式报告退后台（轮询模式语义）
             _state.value = null
             return
         }
-        if (packageName == appContext.packageName) return // 本 APP 自身（含浮层窗口）不改变前台判定
-        if (packageName in transientPackages) return // 系统 UI / 输入法瞬态窗口
-        if (_state.value?.packageName == packageName) return // 去重
+        if (packageName == appContext.packageName) {
+            Log.d(TAG, "drop pkg=$packageName (self window)") // 本 APP 自身（含浮层窗口）不改变前台判定
+            return
+        }
+        if (packageName in transientPackages) {
+            Log.d(TAG, "drop pkg=$packageName (transient)") // 系统 UI / 输入法瞬态窗口
+            return
+        }
+        if (_state.value?.packageName == packageName) return // 去重（高频，不落日志）
+        Log.d(TAG, "foreground -> $packageName")
         _state.value = ForegroundApp(packageName, System.currentTimeMillis())
     }
 
@@ -125,6 +136,7 @@ class ForegroundMonitor(private val appContext: Context) {
     }
 
     private companion object {
+        const val TAG = "ZhishiGuard"
         const val SYSTEM_UI_PACKAGE = "com.android.systemui"
         const val IME_SERVICE_ACTION = "android.view.InputMethod"
     }

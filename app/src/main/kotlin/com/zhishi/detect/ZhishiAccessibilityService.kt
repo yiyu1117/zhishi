@@ -5,6 +5,7 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.provider.Settings
+import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import com.google.android.accessibility.selecttospeak.SelectToSpeakService
 import com.zhishi.AppGraph
@@ -41,6 +42,7 @@ open class ZhishiAccessibilityService : AccessibilityService(), ForegroundDetect
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null || event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
         val pkg = event.packageName?.toString() ?: return
+        Log.d(TAG, "a11y event pkg=$pkg")
         listener?.onForegroundChanged(pkg)
     }
 
@@ -65,6 +67,9 @@ open class ZhishiAccessibilityService : AccessibilityService(), ForegroundDetect
     }
 
     companion object {
+        /** 全链路诊断日志统一 TAG（事件 → 监视器 → 状态机 → 浮层）。 */
+        const val TAG = "ZhishiGuard"
+
         private val bound = MutableStateFlow(false)
 
         /** 无障碍是否已连接（系统已绑定本服务）。 */

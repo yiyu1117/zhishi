@@ -148,7 +148,7 @@ fun PollingGuideCard(modifier: Modifier = Modifier) {
 }
 
 @Composable
-private fun GuideRow(
+internal fun GuideRow(
     title: String,
     description: String,
     /** null = 无法探测（仅说明项），展示中性图标。 */
@@ -191,7 +191,7 @@ private fun GuideRow(
     }
 }
 
-private fun isIgnoringBatteryOptimizations(context: Context): Boolean =
+internal fun isIgnoringBatteryOptimizations(context: Context): Boolean =
     context.getSystemService(PowerManager::class.java)
         ?.isIgnoringBatteryOptimizations(context.packageName) == true
 
@@ -206,7 +206,7 @@ private fun openUsageAccessSettings(context: Context) {
     }
 }
 
-private fun requestIgnoreBatteryOptimizations(context: Context) {
+internal fun requestIgnoreBatteryOptimizations(context: Context) {
     try {
         context.startActivity(
             Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)

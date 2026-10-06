@@ -3,6 +3,7 @@ package com.zhishi.overlay
 import android.content.Context
 import android.graphics.PixelFormat
 import android.provider.Settings
+import android.util.Log
 import android.view.WindowManager
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
@@ -40,8 +41,12 @@ class OverlayManager(
 
     /** 状态机路径：显示/刷新浮层。 */
     fun show(packageName: String, appName: String, spec: OverlaySpec, remainingMillis: Long? = null) {
-        if (!Settings.canDrawOverlays(appContext)) return
+        if (!Settings.canDrawOverlays(appContext)) {
+            Log.w(TAG, "overlay blocked (no SYSTEM_ALERT_WINDOW) pkg=$packageName")
+            return
+        }
         currentPackage = packageName
+        Log.d(TAG, "overlay show pkg=$packageName spec=${spec::class.simpleName}")
         content.value = OverlayContent.Machine(packageName, appName, spec, remainingMillis, appearanceEpoch)
         attachIfNeeded()
     }
@@ -96,7 +101,8 @@ class OverlayManager(
         try {
             windowManager.addView(view, params)
         } catch (e: Exception) {
-            // 权限可能刚被撤销等窗口级异常：不致命，放弃本次显示
+            // 权限可能刚被撤销等窗口级异常：不致命，放弃本次显示，但留诊断日志
+            Log.w(TAG, "overlay addView failed pkg=$currentPackage", e)
             owner.destroy()
             return
         }
@@ -116,5 +122,9 @@ class OverlayManager(
             // 视图可能已被窗口侧移除
         }
         owner?.destroy() // detach 后销毁，下次显示重建全新宿主与组合
+    }
+
+    private companion object {
+        const val TAG = "ZhishiGuard"
     }
 }

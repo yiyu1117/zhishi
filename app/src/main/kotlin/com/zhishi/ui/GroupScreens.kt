@@ -80,6 +80,7 @@ internal fun GroupListScreen(
 
     var showCreateDialog by remember { mutableStateOf(false) }
     var newGroupName by remember { mutableStateOf("") }
+    val keepAliveDismissed by settings.keepAliveGuideDismissed.collectAsStateWithLifecycle(initialValue = false)
 
     Scaffold(
         topBar = {
@@ -105,6 +106,12 @@ internal fun GroupListScreen(
         Column(Modifier.padding(padding).fillMaxSize()) {
             if (lock.config != null && lock.locked) {
                 DisciplineLockBanner(lock.windowText)
+                Spacer(Modifier.height(8.dp))
+            }
+            if (!keepAliveDismissed) {
+                KeepAliveGuideCard(onDismiss = {
+                    scope.launch { settings.setKeepAliveGuideDismissed(true) }
+                })
                 Spacer(Modifier.height(8.dp))
             }
             if (groups.isEmpty()) {

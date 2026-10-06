@@ -49,6 +49,10 @@ class SettingsRepository(private val appContext: Context) {
             ?: DetectionMode.ACCESSIBILITY
     }
 
+    /** 用户已关闭「后台保活引导」卡（HyperOS/MIUI 冻结防护提示）。 */
+    val keepAliveGuideDismissed: Flow<Boolean> =
+        dataStore.data.map { it[KEEP_ALIVE_DISMISSED_KEY] ?: false }
+
     val settings: Flow<SettingsSnapshot> = combine(
         defaultTimeParams,
         newGroupDailyLimitMinutes,
@@ -96,6 +100,10 @@ class SettingsRepository(private val appContext: Context) {
 
     suspend fun setDetectionMode(mode: DetectionMode) {
         dataStore.edit { it[DETECTION_MODE_KEY] = mode.name }
+    }
+
+    suspend fun setKeepAliveGuideDismissed(dismissed: Boolean) {
+        dataStore.edit { it[KEEP_ALIVE_DISMISSED_KEY] = dismissed }
     }
 
     // region 解码 / 编码
@@ -177,5 +185,6 @@ class SettingsRepository(private val appContext: Context) {
         val LOCK_START_KEY = intPreferencesKey("disciplineLock.startMinuteOfDay")
         val LOCK_END_KEY = intPreferencesKey("disciplineLock.endMinuteOfDay")
         val DETECTION_MODE_KEY = stringPreferencesKey("detection.mode")
+        val KEEP_ALIVE_DISMISSED_KEY = booleanPreferencesKey("guide.keepAlive.dismissed")
     }
 }
