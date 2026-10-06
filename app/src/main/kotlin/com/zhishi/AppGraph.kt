@@ -55,7 +55,8 @@ object AppGraph {
         override fun onConfirmExit(packageName: String) = delegate.onConfirmExit(packageName)
 
         override fun onExtensionRequested(packageName: String) = delegate.onExtensionRequested(packageName)
-    }
+
+        override fun onRefreshRequested(packageName: String) = delegate.onRefreshRequested(packageName)    }
 
     val overlayManager: OverlayManager by lazy { OverlayManager(appContext, overlayInteractionsHub) }
     val foregroundMonitor: ForegroundMonitor by lazy { ForegroundMonitor(appContext) }

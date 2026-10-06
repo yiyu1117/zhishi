@@ -16,12 +16,20 @@ interface OverlayInteractions {
     /** "时间已到"/冷却浮层：用户点击延时按钮（仅浮层显示延时按钮时可达）。 */
     fun onExtensionRequested(packageName: String)
 
+    /**
+     * 浮层工具行的「刷新」：检测当前真实前台——若并非 [packageName]（误弹/系统异常残留），
+     * 立即关闭该浮层并返回 false；确认仍在前台则返回 true（浮层保留，UI 内联提示）。
+     * 自检逃生门，不受按钮保护计时约束。
+     */
+    fun onRefreshRequested(packageName: String): Boolean
+
     companion object {
         /** 空实现：[OverlayManager] 构造函数默认值，未接线时按钮点击静默忽略，保证不接线也编译通过。 */
         val NONE: OverlayInteractions = object : OverlayInteractions {
             override fun onDurationSelected(packageName: String, minutes: Int) = Unit
             override fun onConfirmExit(packageName: String) = Unit
             override fun onExtensionRequested(packageName: String) = Unit
+            override fun onRefreshRequested(packageName: String) = true
         }
     }
 }

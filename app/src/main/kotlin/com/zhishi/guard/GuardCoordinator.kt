@@ -199,6 +199,21 @@ class GuardCoordinator(
         machines[packageName]?.let { translate(packageName, it.dispatch(GuardEvent.ExtensionRequested)) }
     }
 
+    /**
+     * 浮层「刷新」自检：探测当前真实前台，若并非 [packageName]（误弹/ROM 异常导致的
+     * 残留浮层），按退后台处理并关闭浮层（返回 false）；确认仍在前台则保留（返回 true，
+     * 由浮层内联提示）。前台探测双源：UsageStats 最近使用启发式优先（监视器本身可能
+     * 是卡住的源头），失败回退监视器实时判定。
+     */
+    override fun onRefreshRequested(packageName: String): Boolean {
+        val actual = PollingForegroundDetector.latestUsedPackage(appContext)
+            ?: monitor.state.value?.packageName
+        if (actual == packageName) return true
+        machines[packageName]?.let { translate(packageName, it.dispatch(GuardEvent.Backgrounded)) }
+        overlayManager.hide(packageName)
+        return false
+    }
+
     // endregion
 
     // region 效果翻译

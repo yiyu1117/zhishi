@@ -72,6 +72,65 @@ internal fun OverlayRoot(
             null -> Unit
             is OverlayContent.Machine -> MachineOverlay(c, interactions)
         }
+        (content as? OverlayContent.Machine)?.let { c ->
+            OverlayChrome(c, interactions, Modifier.align(Alignment.TopEnd))
+        }
+    }
+}
+
+/**
+ * 浮层右上角工具行（所有形态通用）：
+ * - ↻ 刷新：前台自检逃生门——检测当前真实前台，若并非本浮层对应应用则立即关闭
+ *   （ROM 异常导致的残留浮层自救），不受按钮保护计时约束；确认仍在前台时在浮层上
+ *   内联提示（Toast 会被 TYPE_APPLICATION_OVERLAY 盖住，不可用）；
+ * - ? 说明：在浮层上内联展开用途说明（悬浮窗内弹 Dialog 会创建对话框窗口导致崩溃）。
+ */
+@Composable
+private fun OverlayChrome(
+    content: OverlayContent.Machine,
+    interactions: OverlayInteractions,
+    modifier: Modifier = Modifier,
+) {
+    var showHelp by remember { mutableStateOf(false) }
+    var refreshNote by remember { mutableStateOf<String?>(null) }
+
+    Column(modifier.padding(top = 4.dp, end = 4.dp), horizontalAlignment = Alignment.End) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            TextButton(onClick = {
+                val kept = interactions.onRefreshRequested(content.packageName)
+                if (kept) refreshNote = "已确认仍在 ${content.appName} 前台，浮层保留"
+            }) {
+                Text("↻", fontSize = 20.sp, color = OnOverlayFaint)
+            }
+            TextButton(onClick = { showHelp = !showHelp }) {
+                Text("?", fontSize = 18.sp, color = OnOverlayFaint)
+            }
+        }
+        refreshNote?.let { note ->
+            Text(
+                note,
+                fontSize = 13.sp,
+                color = OnOverlayDim,
+                textAlign = TextAlign.End,
+                modifier = Modifier.padding(end = 8.dp),
+            )
+            LaunchedEffect(note) {
+                delay(3000)
+                refreshNote = null
+            }
+        }
+        if (showHelp) {
+            Text(
+                "这是「知时」的拦截浮层：打开被管控的应用时，先选择本次使用时长，" +
+                    "时间用尽会强制休息并进入冷却。\n\n" +
+                    "↻ 刷新：检测当前真实前台应用，若它并不是本浮层对应的应用" +
+                    "（误弹或系统异常导致的残留浮层），会立即关闭浮层。",
+                fontSize = 13.sp,
+                color = OnOverlayDim,
+                textAlign = TextAlign.End,
+                modifier = Modifier.widthIn(max = 320.dp).padding(horizontal = 8.dp),
+            )
+        }
     }
 }
 
