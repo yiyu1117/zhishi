@@ -33,6 +33,14 @@ class ForegroundMonitor(private val appContext: Context) {
     /** 当前前台应用；null = 退到桌面之外（息屏/锁屏）或尚无数据。 */
     val state: StateFlow<ForegroundApp?> = _state.asStateFlow()
 
+    private val _visiblePackages = MutableStateFlow<Set<String>>(emptySet())
+
+    /**
+     * 无障碍窗口扫描的可见窗口包名（已滤本应用与瞬态窗口）；轮询模式恒为空集。
+     * 分屏/自由窗口中被管理应用未获焦也会出现在此集合——协调器据此"可见即前台"。
+     */
+    val visiblePackages: StateFlow<Set<String>> = _visiblePackages.asStateFlow()
+
     private var detector: ForegroundDetector? = null
     private var screenOn: Boolean = true
     private var receiverRegistered = false
@@ -77,6 +85,7 @@ class ForegroundMonitor(private val appContext: Context) {
             receiverRegistered = false
         }
         _state.value = null
+        _visiblePackages.value = emptySet()
     }
 
     /** 注入检测实现（无障碍 provider 由服务连接时注入；ticket 09 在此替换为轮询 provider）。 */
@@ -97,9 +106,13 @@ class ForegroundMonitor(private val appContext: Context) {
     /** 清空前台判定（如无障碍断开且无替代 provider）：经状态流触发协调器的退后台派发。 */
     fun reset() {
         _state.value = null
+        _visiblePackages.value = emptySet()
     }
 
-    private val listener = ForegroundListener { onDetectorEvent(it) }
+    private val listener = object : ForegroundListener {
+        override fun onForegroundChanged(packageName: String?) = onDetectorEvent(packageName)
+        override fun onVisiblePackagesChanged(packages: Set<String>) = onVisibleWindows(packages)
+    }
 
     private fun onDetectorEvent(packageName: String?) {
         if (!screenOn) {
@@ -122,6 +135,18 @@ class ForegroundMonitor(private val appContext: Context) {
         if (_state.value?.packageName == packageName) return // 去重（高频，不落日志）
         Log.d(TAG, "foreground -> $packageName")
         _state.value = ForegroundApp(packageName, System.currentTimeMillis())
+    }
+
+    private fun onVisibleWindows(packages: Set<String>) {
+        if (!screenOn) {
+            if (_visiblePackages.value.isEmpty()) return
+            _visiblePackages.value = emptySet() // 息屏视同全部不可见
+            return
+        }
+        val filtered = packages.filterTo(HashSet()) { it != appContext.packageName && it !in transientPackages }
+        if (filtered == _visiblePackages.value) return // 去重（每个窗口事件都扫描）
+        Log.d(TAG, "visible windows -> $filtered")
+        _visiblePackages.value = filtered
     }
 
     private fun loadTransientPackages(): Set<String> {

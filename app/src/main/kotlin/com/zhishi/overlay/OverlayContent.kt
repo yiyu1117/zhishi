@@ -64,16 +64,18 @@ sealed interface OverlayContent {
 @Composable
 internal fun OverlayRoot(
     contentState: StateFlow<OverlayContent?>,
+    refreshEnabled: StateFlow<Boolean>,
     interactions: OverlayInteractions,
 ) {
     val content by contentState.collectAsState()
+    val showRefresh by refreshEnabled.collectAsState()
     Box(Modifier.fillMaxSize().background(OverlayScrim)) {
         when (val c = content) {
             null -> Unit
             is OverlayContent.Machine -> MachineOverlay(c, interactions)
         }
         (content as? OverlayContent.Machine)?.let { c ->
-            OverlayChrome(c, interactions, Modifier.align(Alignment.TopEnd))
+            OverlayChrome(c, interactions, showRefresh, Modifier.align(Alignment.TopEnd))
         }
     }
 }
@@ -82,13 +84,16 @@ internal fun OverlayRoot(
  * 浮层右上角工具行（所有形态通用）：
  * - ↻ 刷新：前台自检逃生门——检测当前真实前台，若并非本浮层对应应用则立即关闭
  *   （ROM 异常导致的残留浮层自救），不受按钮保护计时约束；确认仍在前台时在浮层上
- *   内联提示（Toast 会被 TYPE_APPLICATION_OVERLAY 盖住，不可用）；
+ *   内联提示（Toast 会被 TYPE_APPLICATION_OVERLAY 盖住，不可用）。
+ *   仅轮询模式显示（[showRefresh]）：无障碍模式下事件源与前台判定一致，且 UsageStats
+ *   落账延迟会在刚打开应用时误判，逃生门反成绕过口子，直接禁用；
  * - ? 说明：在浮层上内联展开用途说明（悬浮窗内弹 Dialog 会创建对话框窗口导致崩溃）。
  */
 @Composable
 private fun OverlayChrome(
     content: OverlayContent.Machine,
     interactions: OverlayInteractions,
+    showRefresh: Boolean,
     modifier: Modifier = Modifier,
 ) {
     var showHelp by remember { mutableStateOf(false) }
@@ -96,11 +101,13 @@ private fun OverlayChrome(
 
     Column(modifier.padding(top = 4.dp, end = 4.dp), horizontalAlignment = Alignment.End) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            TextButton(onClick = {
-                val kept = interactions.onRefreshRequested(content.packageName)
-                if (kept) refreshNote = "已确认仍在 ${content.appName} 前台，浮层保留"
-            }) {
-                Text("↻", fontSize = 20.sp, color = OnOverlayFaint)
+            if (showRefresh) {
+                TextButton(onClick = {
+                    val kept = interactions.onRefreshRequested(content.packageName)
+                    if (kept) refreshNote = "已确认仍在 ${content.appName} 前台，浮层保留"
+                }) {
+                    Text("↻", fontSize = 20.sp, color = OnOverlayFaint)
+                }
             }
             TextButton(onClick = { showHelp = !showHelp }) {
                 Text("?", fontSize = 18.sp, color = OnOverlayFaint)
@@ -122,9 +129,13 @@ private fun OverlayChrome(
         if (showHelp) {
             Text(
                 "这是「知时」的拦截浮层：打开被管控的应用时，先选择本次使用时长，" +
-                    "时间用尽会强制休息并进入冷却。\n\n" +
-                    "↻ 刷新：检测当前真实前台应用，若它并不是本浮层对应的应用" +
-                    "（误弹或系统异常导致的残留浮层），会立即关闭浮层。",
+                    "时间用尽会强制休息并进入冷却。" +
+                    if (showRefresh) {
+                        "\n\n↻ 刷新：检测当前真实前台应用，若它并不是本浮层对应的应用" +
+                            "（误弹或系统异常导致的残留浮层），会立即关闭浮层。"
+                    } else {
+                        ""
+                    },
                 fontSize = 13.sp,
                 color = OnOverlayDim,
                 textAlign = TextAlign.End,
@@ -293,6 +304,12 @@ private fun TimeSelectionOverlay(
             )
             Spacer(Modifier.height(6.dp))
             CountdownHint(quickEnabled, protection, spec.quickProtectMillis)
+        }
+
+        Spacer(Modifier.height(28.dp))
+        // 主动退出：未开始会话、无冷却语义，直接送回桌面
+        ProtectedButton("退出（返回桌面）", protection, spec.quickProtectMillis) {
+            interactions.onConfirmExit(content.packageName)
         }
     }
 }
@@ -546,8 +563,13 @@ private fun CooldownOverlay(
             color = OnOverlay,
             textAlign = TextAlign.Center,
         )
+        Spacer(Modifier.height(36.dp))
+        // 冷却期间主动返回桌面：逃生门不受按钮保护计时约束（与「↻ 刷新」同理），直接可点
+        Button(onClick = { interactions.onConfirmExit(content.packageName) }) {
+            Text("返回桌面", fontSize = 17.sp)
+        }
         if (spec.extensionAvailable) {
-            Spacer(Modifier.height(36.dp))
+            Spacer(Modifier.height(18.dp))
             ProtectedButton("延时使用（限一次）", protection, spec.extensionProtectMillis) {
                 interactions.onExtensionRequested(content.packageName)
             }

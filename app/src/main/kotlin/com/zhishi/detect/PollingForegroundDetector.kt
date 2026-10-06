@@ -214,37 +214,10 @@ class PollingForegroundDetector(
         }
     }
 
-    private fun isBackgroundEventType(type: Int): Boolean =
-        // MOVE_TO_BACKGROUND(2) 与 ACTIVITY_PAUSED 同值（后者 API 29 才引入）。
-        @Suppress("DEPRECATION")
-        (type == UsageEvents.Event.MOVE_TO_BACKGROUND)
-
     private fun emitIfNeeded(candidate: String?) {
         if (candidate == lastEmitted) return
         lastEmitted = candidate
         listener?.onForegroundChanged(candidate)
-    }
-
-    private fun isForegroundEventType(type: Int): Boolean =
-        // MOVE_TO_FOREGROUND(1) 与 ACTIVITY_RESUMED 同值（后者 API 29 才引入）；
-        // 用旧常量保证 minSdk 26 全版本一致，弃用警告在此收敛。
-        @Suppress("DEPRECATION")
-        (type == UsageEvents.Event.MOVE_TO_FOREGROUND)
-
-    /**
-     * 迭代读取下一条事件并填入 [sink]。
-     * API 29+ 用两参重载（SDK 36 桩已移除旧的单参重载，无法直接编译）；
-     * API 26-28 运行时仍保留单参实现，经反射调用（缓存 Method，避免每次轮询查找）。
-     */
-    private fun readNextEvent(events: UsageEvents, sink: UsageEvents.Event): UsageEvents.Event? {
-        if (!events.hasNextEvent()) return null
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            events.getNextEvent(sink)
-            sink
-        } else {
-            val method = legacyGetNextEvent ?: return null
-            runCatching { method.invoke(events) as? UsageEvents.Event }.getOrNull()
-        }
     }
 
     // endregion
@@ -290,6 +263,33 @@ class PollingForegroundDetector(
             runCatching { UsageEvents::class.java.getMethod("getNextEvent") }.getOrNull()
         }
 
+        private fun isForegroundEventType(type: Int): Boolean =
+            // MOVE_TO_FOREGROUND(1) 与 ACTIVITY_RESUMED 同值（后者 API 29 才引入）；
+            // 用旧常量保证 minSdk 26 全版本一致，弃用警告在此收敛。
+            @Suppress("DEPRECATION")
+            (type == UsageEvents.Event.MOVE_TO_FOREGROUND)
+
+        private fun isBackgroundEventType(type: Int): Boolean =
+            // MOVE_TO_BACKGROUND(2) 与 ACTIVITY_PAUSED 同值（后者 API 29 才引入）。
+            @Suppress("DEPRECATION")
+            (type == UsageEvents.Event.MOVE_TO_BACKGROUND)
+
+        /**
+         * 迭代读取下一条事件并填入 [sink]。
+         * API 29+ 用两参重载（SDK 36 桩已移除旧的单参重载，无法直接编译）；
+         * API 26-28 运行时仍保留单参实现，经反射调用（缓存 Method，避免每次轮询查找）。
+         */
+        private fun readNextEvent(events: UsageEvents, sink: UsageEvents.Event): UsageEvents.Event? {
+            if (!events.hasNextEvent()) return null
+            return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                events.getNextEvent(sink)
+                sink
+            } else {
+                val method = legacyGetNextEvent ?: return null
+                runCatching { method.invoke(events) as? UsageEvents.Event }.getOrNull()
+            }
+        }
+
         /**
          * 是否已授予"使用情况访问"权限（AppOpsManager OPSTR_GET_USAGE_STATS）。
          * 引导卡、前台服务与开机接收器共用。
@@ -320,6 +320,46 @@ class PollingForegroundDetector(
             } catch (_: Exception) {
                 null
             }
+        }
+
+        /**
+         * 前台切换证据（退后台挂起确认用，ADR 0003）：回看 [sinceMillis] 之后的窗口内，
+         * 是否出现 [excluded] 以外应用的前台事件（[foreignResumed]），以及 [excluded]
+         * 自身的后台事件（[selfPaused]）。两者齐备即证实真实切换；被强杀的应用永远
+         * 等不到 PAUSED，由调用方的安全窗强制放行；瞬态系统窗口（音量条等）两者皆无。
+         * 无使用情况访问权限时返回全 false（调用方按无证据处理，退化为立即退后台语义）。
+         */
+        fun foregroundSwitchEvidence(
+            context: Context,
+            excluded: String,
+            sinceMillis: Long,
+        ): SwitchEvidence {
+            val usm = context.getSystemService(UsageStatsManager::class.java)
+                ?: return SwitchEvidence(foreignResumed = false, selfPaused = false)
+            val now = System.currentTimeMillis()
+            return try {
+                val events = usm.queryEvents(sinceMillis, now)
+                var foreignResumed = false
+                var selfPaused = false
+                val sink = UsageEvents.Event()
+                while (true) {
+                    val event = readNextEvent(events, sink) ?: break
+                    val pkg = event.packageName ?: continue
+                    when {
+                        isForegroundEventType(event.eventType) && pkg != excluded -> foreignResumed = true
+                        isBackgroundEventType(event.eventType) && pkg == excluded -> selfPaused = true
+                    }
+                }
+                SwitchEvidence(foreignResumed, selfPaused)
+            } catch (_: Exception) {
+                SwitchEvidence(foreignResumed = false, selfPaused = false)
+            }
+        }
+
+        /** [foregroundSwitchEvidence] 的查询结果。 */
+        data class SwitchEvidence(val foreignResumed: Boolean, val selfPaused: Boolean) {
+            /** 真实切换的证实条件：有新应用前台事件，且原应用有暂停记录。 */
+            val confirmed: Boolean get() = foreignResumed && selfPaused
         }
     }
 }

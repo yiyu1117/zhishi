@@ -22,6 +22,9 @@ import kotlinx.coroutines.launch
  * [com.zhishi.detect.ForegroundMonitor]（经 [AppGraph] 获取），同时拉起协调器；
  * START_STICKY 保证被杀后自动重启。模式切换（本服务与无障碍 provider 的 attach/切换）
  * 由主控在协调器完成 —— 切换时须先 stop 本服务再 attach 无障碍 provider（onDestroy 会拆线）。
+ *
+ * 常驻通知随守护状态刷新：当前前台应用处于会话/延时中时，展示其剩余使用时长
+ * （分钟粒度，值变化才 notify），其余情况回落到默认守护文案。
  */
 class PollingForegroundService : LifecycleService() {
 
@@ -34,6 +37,18 @@ class PollingForegroundService : LifecycleService() {
         super.onCreate()
         ensureChannel()
         startForegroundCompat(buildNotification(CONTENT_TEXT_GUARDING))
+        lifecycleScope.launch {
+            var lastText: String? = null
+            AppGraph.coordinator.notificationUsage.collect { usage ->
+                val text = usage?.let {
+                    "正在使用 ${it.appName}，剩余 ${minutesCeil(it.remainingMillis)} 分钟"
+                } ?: CONTENT_TEXT_GUARDING
+                if (text == lastText) return@collect
+                lastText = text
+                getSystemService(NotificationManager::class.java)
+                    ?.notify(NOTIFICATION_ID, buildNotification(text))
+            }
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -114,6 +129,9 @@ class PollingForegroundService : LifecycleService() {
             startForeground(NOTIFICATION_ID, notification)
         }
     }
+
+    /** 毫秒向上取整到分钟（通知剩余时长的展示粒度，分钟值变化才更新通知）。 */
+    private fun minutesCeil(millis: Long): Long = (millis + 59_999L) / 60_000L
 
     // endregion
 

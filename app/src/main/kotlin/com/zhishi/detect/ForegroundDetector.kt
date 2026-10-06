@@ -3,8 +3,15 @@ package com.zhishi.detect
 /**
  * 前台变化监听：packageName 为 null 表示退到后台或息屏。
  */
-fun interface ForegroundListener {
+interface ForegroundListener {
     fun onForegroundChanged(packageName: String?)
+
+    /**
+     * 无障碍窗口扫描：当前屏幕上所有可见窗口的包名集合（分屏/自由窗口中的被管理
+     * 应用未获焦也应拦截）。轮询实现不提供（保持缺省空实现）；调用频率与窗口事件一致，
+     * 实现方自行去重。
+     */
+    fun onVisiblePackagesChanged(packages: Set<String>) = Unit
 }
 
 /**

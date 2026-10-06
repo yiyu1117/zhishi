@@ -29,9 +29,24 @@ class OverlayManager(
     private val windowManager = appContext.getSystemService(WindowManager::class.java)
     private val content = MutableStateFlow<OverlayContent?>(null)
 
+    /**
+     * 「↻ 刷新」自检按钮可用性：逃生门只对轮询模式有意义——无障碍模式下事件源与前台
+     * 判定本就一致，且 UsageStats 落账有约 1 秒延迟，刚打开应用时点刷新会误判关闭浮层，
+     * 反成绕过口子。由协调器随检测模式设置；默认关闭。
+     */
+    private val refreshEnabled = MutableStateFlow(false)
+
     private var currentPackage: String? = null
     private var composeView: ComposeView? = null
     private var lifecycleOwner: OverlayLifecycleOwner? = null
+
+    /** 浮层可见性回调：(包名, 是否可见)。窗口 attach 成功 / detach 时触发，协调器据此接线音频静音。 */
+    var onVisibilityChanged: ((packageName: String, visible: Boolean) -> Unit)? = null
+
+    /** 设置「↻ 刷新」按钮可用性（协调器随检测模式切换调用）。 */
+    fun setRefreshEnabled(enabled: Boolean) {
+        refreshEnabled.value = enabled
+    }
 
     /**
      * 浮层出现纪元：每次实际隐藏后递增。作为浮层内容身份键的一部分，
@@ -54,10 +69,13 @@ class OverlayManager(
     /** 关闭浮层；指定包名时仅当当前浮层属于该包才关闭。 */
     fun hide(packageName: String? = null) {
         if (packageName != null && currentPackage != packageName) return
+        val detachedPkg = currentPackage
         currentPackage = null
         content.value = null
         appearanceEpoch++ // 隐藏重现须重新计时（保护计时绑定"浮层出现"）
-        detach()
+        if (detach() && detachedPkg != null) {
+            onVisibilityChanged?.invoke(detachedPkg, false)
+        }
     }
 
     fun hideAll() = hide(null)
@@ -87,7 +105,7 @@ class OverlayManager(
             setViewTreeSavedStateRegistryOwner(owner)
             setContent {
                 MaterialTheme(colorScheme = darkColorScheme()) {
-                    OverlayRoot(content, interactions)
+                    OverlayRoot(content, refreshEnabled, interactions)
                 }
             }
         }
@@ -109,10 +127,12 @@ class OverlayManager(
         composeView = view
         lifecycleOwner = owner
         owner.resume() // attach 后推进到 RESUMED
+        currentPackage?.let { pkg -> onVisibilityChanged?.invoke(pkg, true) }
     }
 
-    private fun detach() {
-        val view = composeView ?: return
+    /** detach 已挂载的浮层视图；返回是否确实移除了窗口（调用方据此发可见性回调）。 */
+    private fun detach(): Boolean {
+        val view = composeView ?: return false
         val owner = lifecycleOwner
         composeView = null
         lifecycleOwner = null
@@ -122,6 +142,7 @@ class OverlayManager(
             // 视图可能已被窗口侧移除
         }
         owner?.destroy() // detach 后销毁，下次显示重建全新宿主与组合
+        return true
     }
 
     private companion object {

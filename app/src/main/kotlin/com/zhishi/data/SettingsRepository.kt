@@ -53,6 +53,9 @@ class SettingsRepository(private val appContext: Context) {
     val keepAliveGuideDismissed: Flow<Boolean> =
         dataStore.data.map { it[KEEP_ALIVE_DISMISSED_KEY] ?: false }
 
+    /** 调试模式：以小悬浮窗显示全部状态机实时状态（排查拦截/计时问题用），默认关。 */
+    val debugMode: Flow<Boolean> = dataStore.data.map { it[DEBUG_MODE_KEY] ?: false }
+
     val settings: Flow<SettingsSnapshot> = combine(
         defaultTimeParams,
         newGroupDailyLimitMinutes,
@@ -104,6 +107,10 @@ class SettingsRepository(private val appContext: Context) {
 
     suspend fun setKeepAliveGuideDismissed(dismissed: Boolean) {
         dataStore.edit { it[KEEP_ALIVE_DISMISSED_KEY] = dismissed }
+    }
+
+    suspend fun setDebugMode(enabled: Boolean) {
+        dataStore.edit { it[DEBUG_MODE_KEY] = enabled }
     }
 
     // region 解码 / 编码
@@ -186,5 +193,6 @@ class SettingsRepository(private val appContext: Context) {
         val LOCK_END_KEY = intPreferencesKey("disciplineLock.endMinuteOfDay")
         val DETECTION_MODE_KEY = stringPreferencesKey("detection.mode")
         val KEEP_ALIVE_DISMISSED_KEY = booleanPreferencesKey("guide.keepAlive.dismissed")
+        val DEBUG_MODE_KEY = booleanPreferencesKey("debug.overlay.enabled")
     }
 }

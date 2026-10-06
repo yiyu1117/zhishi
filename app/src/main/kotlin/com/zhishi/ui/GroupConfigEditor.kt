@@ -118,7 +118,12 @@ internal fun GroupConfigEditSection(
 
         GroupSubHeader("快选档位（拦截浮层的时长按钮）")
         time.quickOptionsMinutes.forEachIndexed { index, minutes ->
-            GroupSettingRow("快选档位 ${index + 1}", "$minutes 分钟", enabled = writable) {
+            GroupSettingRow(
+                "快选档位 ${index + 1}",
+                "$minutes 分钟",
+                enabled = writable,
+                description = "拦截浮层上的第 ${index + 1} 个时长快选按钮，点击即按该时长开始本次使用。",
+            ) {
                 editRequest = GroupEditRequest(
                     title = "快选档位 ${index + 1}（分钟）",
                     initial = minutes,
@@ -134,7 +139,12 @@ internal fun GroupConfigEditSection(
         }
 
         GroupSubHeader("浮层按钮保护（按下后数秒不可点，防习惯性误触）")
-        GroupSettingRow("快选按钮保护", "${time.quickProtectMillis / 1000} 秒", enabled = writable) {
+        GroupSettingRow(
+            "快选按钮保护",
+            "${time.quickProtectMillis / 1000} 秒",
+            enabled = writable,
+            description = "拦截浮层弹出后，快选/自定义按钮需等待的秒数。",
+        ) {
             editRequest = GroupEditRequest(
                 title = "快选按钮保护（秒）",
                 initial = (time.quickProtectMillis / 1000).toInt(),
@@ -143,7 +153,12 @@ internal fun GroupConfigEditSection(
                 onUpdate(config.copy(time = time.copy(quickProtectMillis = value * 1000L)))
             }
         }
-        GroupSettingRow("确定按钮保护（时间已到 / 额度用尽）", "${time.confirmProtectMillis / 1000} 秒", enabled = writable) {
+        GroupSettingRow(
+            "确定按钮保护（时间已到 / 额度用尽）",
+            "${time.confirmProtectMillis / 1000} 秒",
+            enabled = writable,
+            description = "「确定，返回桌面」按钮需等待的秒数。",
+        ) {
             editRequest = GroupEditRequest(
                 title = "确定按钮保护（秒）",
                 initial = (time.confirmProtectMillis / 1000).toInt(),
@@ -152,7 +167,12 @@ internal fun GroupConfigEditSection(
                 onUpdate(config.copy(time = time.copy(confirmProtectMillis = value * 1000L)))
             }
         }
-        GroupSettingRow("延时按钮保护", "${time.extensionProtectMillis / 1000} 秒", enabled = writable) {
+        GroupSettingRow(
+            "延时按钮保护",
+            "${time.extensionProtectMillis / 1000} 秒",
+            enabled = writable,
+            description = "「延时使用」按钮需等待的秒数。",
+        ) {
             editRequest = GroupEditRequest(
                 title = "延时按钮保护（秒）",
                 initial = (time.extensionProtectMillis / 1000).toInt(),
@@ -163,7 +183,12 @@ internal fun GroupConfigEditSection(
         }
 
         GroupSubHeader("延时使用")
-        GroupSettingRow("延时时长", "${time.extensionMinutes} 分钟", enabled = writable) {
+        GroupSettingRow(
+            "延时时长",
+            "${time.extensionMinutes} 分钟",
+            enabled = writable,
+            description = "时间用尽后可临时续用的时长（用于收尾），每次会话限用一次。",
+        ) {
             editRequest = GroupEditRequest(
                 title = "延时时长（分钟）",
                 initial = time.extensionMinutes,
@@ -172,7 +197,12 @@ internal fun GroupConfigEditSection(
                 onUpdate(config.copy(time = time.copy(extensionMinutes = value)))
             }
         }
-        GroupSettingRow("延时预告提前", "${time.extensionPrewarnSeconds} 秒", enabled = writable) {
+        GroupSettingRow(
+            "延时预告提前",
+            "${time.extensionPrewarnSeconds} 秒",
+            enabled = writable,
+            description = "延时结束前多少秒 Toast 预告即将锁定。",
+        ) {
             editRequest = GroupEditRequest(
                 title = "延时预告提前（秒）",
                 initial = time.extensionPrewarnSeconds,
@@ -183,7 +213,12 @@ internal fun GroupConfigEditSection(
         }
 
         GroupSubHeader("宽限期与冷却")
-        GroupSettingRow("宽限期", "${time.gracePeriodMillis / 60_000} 分钟", enabled = writable) {
+        GroupSettingRow(
+            "宽限期",
+            "${time.gracePeriodMillis / 60_000} 分钟",
+            enabled = writable,
+            description = "退到后台后计时暂停、会话不重置的最长时长；超过即判中途放弃。",
+        ) {
             editRequest = GroupEditRequest(
                 title = "宽限期（分钟）",
                 initial = (time.gracePeriodMillis / 60_000).toInt(),
@@ -192,7 +227,12 @@ internal fun GroupConfigEditSection(
                 onUpdate(config.copy(time = time.copy(gracePeriodMillis = value * 60_000L)))
             }
         }
-        GroupSettingRow("放弃冷却", "${time.abandonCooldownMillis / 60_000} 分钟", enabled = writable) {
+        GroupSettingRow(
+            "放弃冷却",
+            "${time.abandonCooldownMillis / 60_000} 分钟",
+            enabled = writable,
+            description = "中途放弃（宽限期耗尽仍未回来）后的禁入时长，默认短于到期冷却。",
+        ) {
             editRequest = GroupEditRequest(
                 title = "放弃冷却（分钟）",
                 initial = (time.abandonCooldownMillis / 60_000).toInt(),
@@ -201,7 +241,12 @@ internal fun GroupConfigEditSection(
                 onUpdate(config.copy(time = time.copy(abandonCooldownMillis = value * 60_000L)))
             }
         }
-        GroupSettingRow("到期冷却", "${time.expiryCooldownMillis / 60_000} 分钟", enabled = writable) {
+        GroupSettingRow(
+            "到期冷却",
+            "${time.expiryCooldownMillis / 60_000} 分钟",
+            enabled = writable,
+            description = "时间用尽并确认返回桌面后的禁入时长；倒计时只在你不在该应用内时推进。",
+        ) {
             editRequest = GroupEditRequest(
                 title = "到期冷却（分钟）",
                 initial = (time.expiryCooldownMillis / 60_000).toInt(),
@@ -212,7 +257,12 @@ internal fun GroupConfigEditSection(
         }
 
         GroupSubHeader("提醒")
-        GroupSettingRow("周期用量提示间隔", "${time.usageToastIntervalMillis / 60_000} 分钟", enabled = writable) {
+        GroupSettingRow(
+            "周期用量提示间隔",
+            "${time.usageToastIntervalMillis / 60_000} 分钟",
+            enabled = writable,
+            description = "会话进行中每隔该时长 Toast 报告一次累计已用时间。",
+        ) {
             editRequest = GroupEditRequest(
                 title = "周期用量提示间隔（分钟）",
                 initial = (time.usageToastIntervalMillis / 60_000).toInt(),
@@ -237,7 +287,12 @@ internal fun GroupConfigEditSection(
         }
 
         GroupSubHeader("自定义与限额")
-        GroupSettingRow("自定义时长上限", "${time.customMaxMinutes} 分钟", enabled = writable) {
+        GroupSettingRow(
+            "自定义时长上限",
+            "${time.customMaxMinutes} 分钟",
+            enabled = writable,
+            description = "拦截浮层假数字键盘可输入的最大分钟数。",
+        ) {
             editRequest = GroupEditRequest(
                 title = "自定义时长上限（分钟）",
                 initial = time.customMaxMinutes,
@@ -284,13 +339,23 @@ private fun GroupSettingRow(
     label: String,
     value: String,
     enabled: Boolean,
+    description: String? = null,
     onClick: () -> Unit,
 ) {
     Row(
         Modifier.fillMaxWidth().padding(vertical = 2.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(label, modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge)
+        Column(Modifier.weight(1f)) {
+            Text(label, style = MaterialTheme.typography.bodyLarge)
+            description?.let {
+                Text(
+                    it,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
         TextButton(onClick = onClick, enabled = enabled) { Text(value) }
     }
 }

@@ -19,7 +19,7 @@ interface OverlayInteractions {
     /**
      * 浮层工具行的「刷新」：检测当前真实前台——若并非 [packageName]（误弹/系统异常残留），
      * 立即关闭该浮层并返回 false；确认仍在前台则返回 true（浮层保留，UI 内联提示）。
-     * 自检逃生门，不受按钮保护计时约束。
+     * 自检逃生门，不受按钮保护计时约束。仅在轮询模式由浮层暴露（无障碍模式下按钮隐藏）。
      */
     fun onRefreshRequested(packageName: String): Boolean
 

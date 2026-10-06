@@ -64,6 +64,7 @@ internal fun SettingsScreen(onBack: () -> Unit) {
     val params by repo.defaultTimeParams.collectAsStateWithLifecycle(initialValue = null)
     val mode by repo.detectionMode.collectAsStateWithLifecycle(initialValue = null)
     val newGroupLimit by repo.newGroupDailyLimitMinutes.collectAsStateWithLifecycle(initialValue = null)
+    val debugMode by repo.debugMode.collectAsStateWithLifecycle(initialValue = false)
 
     var editRequest by remember { mutableStateOf<NumberEditRequest?>(null) }
     var editingStart by remember { mutableStateOf(false) }
@@ -199,6 +200,31 @@ internal fun SettingsScreen(onBack: () -> Unit) {
             }
             // endregion
 
+            // region 调试模式
+            SettingsSection(title = "调试模式") {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("状态调试悬浮窗", style = MaterialTheme.typography.bodyLarge)
+                        Text(
+                            "在屏幕角落以小悬浮窗列出全部守护应用的实时状态与倒计时" +
+                                "（会话/宽限/延时/冷却，支持多应用），用于排查拦截与计时问题；" +
+                                "悬浮窗不可触摸、不影响任何操作。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(
+                        checked = debugMode,
+                        enabled = !lock.locked,
+                        onCheckedChange = { on -> scope.launch { repo.setDebugMode(on) } },
+                    )
+                }
+            }
+            // endregion
+
             // region 默认参数
             SettingsSection(title = "默认参数") {
                 Text(
@@ -210,7 +236,12 @@ internal fun SettingsScreen(onBack: () -> Unit) {
 
                 SectionSubHeader("快选档位（拦截浮层的 6 个时长按钮）")
                 tp.quickOptionsMinutes.forEachIndexed { index, minutes ->
-                    SettingRow("快选档位 ${index + 1}", "$minutes 分钟", enabled = writable) {
+                    SettingRow(
+                        "快选档位 ${index + 1}",
+                        "$minutes 分钟",
+                        enabled = writable,
+                        description = "拦截浮层上的第 ${index + 1} 个时长快选按钮，点击即按该时长开始本次使用。",
+                    ) {
                         editRequest = NumberEditRequest(
                             title = "快选档位 ${index + 1}（分钟）",
                             initial = minutes,
@@ -230,53 +261,98 @@ internal fun SettingsScreen(onBack: () -> Unit) {
                 }
 
                 SectionSubHeader("浮层按钮保护（按下后数秒不可点，防习惯性误触）")
-                SettingRow("快选按钮保护", "${tp.quickProtectMillis / 1000} 秒", enabled = writable) {
+                SettingRow(
+                    "快选按钮保护",
+                    "${tp.quickProtectMillis / 1000} 秒",
+                    enabled = writable,
+                    description = "拦截浮层弹出后，快选/自定义按钮需等待的秒数。",
+                ) {
                     editRequest = secondsRequest("快选按钮保护（秒）", tp.quickProtectMillis) { value ->
                         repo.updateDefaultTimeParams { it.copy(quickProtectMillis = value * 1000L) }
                     }
                 }
-                SettingRow("确定按钮保护（时间已到 / 额度用尽）", "${tp.confirmProtectMillis / 1000} 秒", enabled = writable) {
+                SettingRow(
+                    "确定按钮保护（时间已到 / 额度用尽）",
+                    "${tp.confirmProtectMillis / 1000} 秒",
+                    enabled = writable,
+                    description = "「确定，返回桌面」按钮需等待的秒数。",
+                ) {
                     editRequest = secondsRequest("确定按钮保护（秒）", tp.confirmProtectMillis) { value ->
                         repo.updateDefaultTimeParams { it.copy(confirmProtectMillis = value * 1000L) }
                     }
                 }
-                SettingRow("延时按钮保护", "${tp.extensionProtectMillis / 1000} 秒", enabled = writable) {
+                SettingRow(
+                    "延时按钮保护",
+                    "${tp.extensionProtectMillis / 1000} 秒",
+                    enabled = writable,
+                    description = "「延时使用」按钮需等待的秒数。",
+                ) {
                     editRequest = secondsRequest("延时按钮保护（秒）", tp.extensionProtectMillis) { value ->
                         repo.updateDefaultTimeParams { it.copy(extensionProtectMillis = value * 1000L) }
                     }
                 }
 
                 SectionSubHeader("延时使用")
-                SettingRow("延时时长", "${tp.extensionMinutes} 分钟", enabled = writable) {
+                SettingRow(
+                    "延时时长",
+                    "${tp.extensionMinutes} 分钟",
+                    enabled = writable,
+                    description = "时间用尽后可临时续用的时长（用于收尾），每次会话限用一次。",
+                ) {
                     editRequest = NumberEditRequest("延时时长（分钟）", tp.extensionMinutes, 1, 180, "分钟") { value ->
                         scope.launch { repo.updateDefaultTimeParams { it.copy(extensionMinutes = value) } }
                     }
                 }
-                SettingRow("延时预告提前", "${tp.extensionPrewarnSeconds} 秒", enabled = writable) {
+                SettingRow(
+                    "延时预告提前",
+                    "${tp.extensionPrewarnSeconds} 秒",
+                    enabled = writable,
+                    description = "延时结束前多少秒 Toast 预告即将锁定。",
+                ) {
                     editRequest = NumberEditRequest("延时预告提前（秒）", tp.extensionPrewarnSeconds, 0, 600, "秒") { value ->
                         scope.launch { repo.updateDefaultTimeParams { it.copy(extensionPrewarnSeconds = value) } }
                     }
                 }
 
                 SectionSubHeader("宽限期与冷却")
-                SettingRow("宽限期", "${tp.gracePeriodMillis / 60_000} 分钟", enabled = writable) {
+                SettingRow(
+                    "宽限期",
+                    "${tp.gracePeriodMillis / 60_000} 分钟",
+                    enabled = writable,
+                    description = "退到后台后计时暂停、会话不重置的最长时长；超过即判中途放弃。",
+                ) {
                     editRequest = minutesRequest("宽限期（分钟）", tp.gracePeriodMillis) { value ->
                         repo.updateDefaultTimeParams { it.copy(gracePeriodMillis = value * 60_000L) }
                     }
                 }
-                SettingRow("放弃冷却", "${tp.abandonCooldownMillis / 60_000} 分钟", enabled = writable) {
+                SettingRow(
+                    "放弃冷却",
+                    "${tp.abandonCooldownMillis / 60_000} 分钟",
+                    enabled = writable,
+                    description = "中途放弃（宽限期耗尽仍未回来）后的禁入时长，默认短于到期冷却。",
+                ) {
                     editRequest = minutesRequest("放弃冷却（分钟）", tp.abandonCooldownMillis) { value ->
                         repo.updateDefaultTimeParams { it.copy(abandonCooldownMillis = value * 60_000L) }
                     }
                 }
-                SettingRow("到期冷却", "${tp.expiryCooldownMillis / 60_000} 分钟", enabled = writable) {
+                SettingRow(
+                    "到期冷却",
+                    "${tp.expiryCooldownMillis / 60_000} 分钟",
+                    enabled = writable,
+                    description = "时间用尽并确认返回桌面后的禁入时长；倒计时只在你不在该应用内时推进。",
+                ) {
                     editRequest = minutesRequest("到期冷却（分钟）", tp.expiryCooldownMillis) { value ->
                         repo.updateDefaultTimeParams { it.copy(expiryCooldownMillis = value * 60_000L) }
                     }
                 }
 
                 SectionSubHeader("提醒")
-                SettingRow("周期用量提示间隔", "${tp.usageToastIntervalMillis / 60_000} 分钟", enabled = writable) {
+                SettingRow(
+                    "周期用量提示间隔",
+                    "${tp.usageToastIntervalMillis / 60_000} 分钟",
+                    enabled = writable,
+                    description = "会话进行中每隔该时长 Toast 报告一次累计已用时间。",
+                ) {
                     editRequest = minutesRequest("周期用量提示间隔（分钟）", tp.usageToastIntervalMillis) { value ->
                         repo.updateDefaultTimeParams { it.copy(usageToastIntervalMillis = value * 60_000L) }
                     }
@@ -292,7 +368,12 @@ internal fun SettingsScreen(onBack: () -> Unit) {
                 )
 
                 SectionSubHeader("自定义与限额")
-                SettingRow("自定义时长上限", "${tp.customMaxMinutes} 分钟", enabled = writable) {
+                SettingRow(
+                    "自定义时长上限",
+                    "${tp.customMaxMinutes} 分钟",
+                    enabled = writable,
+                    description = "拦截浮层假数字键盘可输入的最大分钟数。",
+                ) {
                     editRequest = NumberEditRequest("自定义时长上限（分钟）", tp.customMaxMinutes, 1, 1440, "分钟") { value ->
                         scope.launch { repo.updateDefaultTimeParams { it.copy(customMaxMinutes = value) } }
                     }
@@ -397,13 +478,23 @@ private fun SettingRow(
     label: String,
     value: String,
     enabled: Boolean = true,
+    description: String? = null,
     onClick: () -> Unit,
 ) {
     Row(
         Modifier.fillMaxWidth().padding(vertical = 2.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(label, modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge)
+        Column(Modifier.weight(1f)) {
+            Text(label, style = MaterialTheme.typography.bodyLarge)
+            description?.let {
+                Text(
+                    it,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
         TextButton(onClick = onClick, enabled = enabled) { Text(value) }
     }
 }

@@ -344,6 +344,18 @@ class DefaultGuardStateMachine(
             inForeground = false
             listOf(GuardEffect.GoHome, GuardEffect.FlushState)
         }
+        GuardState.EXPIRY_COOLDOWN, GuardState.ABANDON_COOLDOWN -> {
+            // 冷却浮层的「返回桌面」：冷却照常推进（用户离开后不再冻结）
+            inForeground = false
+            currentOverlay = null
+            listOf(GuardEffect.GoHome, GuardEffect.HideOverlay, GuardEffect.FlushState)
+        }
+        GuardState.AWAITING_SELECTION -> {
+            // 时间选择浮层的「退出」：未开始会话，无冷却语义，仅送回桌面
+            inForeground = false
+            currentOverlay = null
+            listOf(GuardEffect.GoHome, GuardEffect.HideOverlay)
+        }
         else -> emptyList()
     }
 

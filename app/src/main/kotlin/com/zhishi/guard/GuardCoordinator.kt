@@ -31,6 +31,8 @@ import com.zhishi.detect.ForegroundMonitor
 import com.zhishi.detect.PollingForegroundDetector
 import com.zhishi.detect.PollingForegroundService
 import com.zhishi.detect.ZhishiAccessibilityService
+import com.zhishi.overlay.DebugOverlayController
+import com.zhishi.overlay.MachineDebugEntry
 import com.zhishi.overlay.OverlayInteractions
 import com.zhishi.overlay.OverlayManager
 import java.time.LocalDate
@@ -39,18 +41,30 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+
+/**
+ * 常驻通知的用量载荷：当前前台应用的活动使用剩余（会话/延时），文案由展示方（轮询服务）组装。
+ */
+data class NotificationUsage(val appName: String, val remainingMillis: Long)
 
 /**
  * 守护协调器（单例，由 Application 持有；进程内常驻）：
  * - 维护 packageName → GuardStateMachine 映射；
  * - 1 秒 ticker 派发 Tick，检测自然日切换派发 DayChanged；
- * - 前台事件来自 [ForegroundMonitor]，进后台时向原应用状态机派发 Backgrounded；
+ * - 前台事件来自 [ForegroundMonitor]，以"前台机器集合"建模（分屏/可见窗口下可多个）：
+ *   焦点离开走退后台挂起确认（瞬态系统窗口如音量条不构成真实切换，ADR 0003），
+ *   无障碍窗口扫描的可见机器按"可见即前台"进入/退出；
  * - 效果翻译：ShowOverlay/HideOverlay → 浮层、ShowToast → Toast、GoHome → 退出动作、FlushState → 记账落盘；
+ * - 浮层可见期间经 [MediaSilencer] 持有音频焦点（被拦应用不出声）；
  * - 依据分组规则快照重建/热更新状态机；实现 [OverlayInteractions] 接收浮层按钮回调并派发状态机事件；
  * - 记账与恢复：启动时从 [UsageLedger] 载入当日累计与 GuardStateData（ticket 06/10），
  *   周期节流落盘 + FlushState 即时落盘；
- * - 检测模式：跟随 [SettingsRepository.detectionMode] 在无障碍 provider 与轮询服务间切换（ticket 09）。
+ * - 检测模式：跟随 [SettingsRepository.detectionMode] 在无障碍 provider 与轮询服务间切换（ticket 09）；
+ * - 发布常驻通知剩余用量（[notificationUsage]）与调试悬浮窗状态（[debugStates]，设置开关显隐）。
  */
 class GuardCoordinator(
     private val appContext: Context,
@@ -64,15 +78,49 @@ class GuardCoordinator(
 ) : OverlayInteractions {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
+    /** 拦截浮层可见期间的媒体静音器：持有音频焦点，被拦应用暂停出声。 */
+    private val mediaSilencer = MediaSilencer(appContext)
+
+    init {
+        // 浮层可见 ⇔ 持有音频焦点：开屏即播的媒体应用被暂停；对着浮层按返回刷出的
+        // 新视频重新请求焦点时被立即夺回，杜绝"没画面但有声音"。
+        overlayManager.onVisibilityChanged = { _, visible ->
+            if (visible) mediaSilencer.acquire() else mediaSilencer.release()
+        }
+    }
+
     private val machines = LinkedHashMap<String, GuardStateMachine>()
     private val machineConfigs = HashMap<String, GroupConfig>()
     private val machineJobs = HashMap<String, Job>()
 
     private var rulesSnapshot: GroupSnapshot? = null
-    private var lastForeground: String? = null
     private var currentDay: LocalDate? = null
     private var running = false
     private var jobs: List<Job> = emptyList()
+
+    /** 最近一次监视器报告的前台包名（可能是瞬态窗口；机器归属以 [foregroundMachines] 为准）。 */
+    private var lastForeground: String? = null
+
+    /** 机器视角的前台集合：已派发 ForegroundEntered、尚未派发 Backgrounded 的包（分屏/可见窗口下可有多个）。 */
+    private val foregroundMachines = mutableSetOf<String>()
+
+    /** 退后台挂起确认任务（按机器包名）：异包报告可能是瞬态系统窗口（音量条等）伪装成切换，证实后才退后台。 */
+    private val pendingLeaves = HashMap<String, Job>()
+
+    /** 无障碍窗口扫描的可见机器包（"可见即前台"，ADR 0003）；轮询模式恒为空。 */
+    private var visibleMachinePkgs: Set<String> = emptySet()
+
+    /** 常驻通知订阅流：当前前台应用有活动使用剩余时非空（轮询服务收集并刷新通知）。 */
+    private val _notificationUsage = MutableStateFlow<NotificationUsage?>(null)
+    val notificationUsage: StateFlow<NotificationUsage?> = _notificationUsage.asStateFlow()
+
+    /** 调试悬浮窗数据流：全部状态机的实时状态（含闲置），设置页「调试模式」开关控制显隐。 */
+    private val _debugStates = MutableStateFlow<List<MachineDebugEntry>>(emptyList())
+    val debugStates: StateFlow<List<MachineDebugEntry>> = _debugStates.asStateFlow()
+    private val debugEntries = LinkedHashMap<String, MachineDebugEntry>()
+
+    /** 调试小悬浮窗（设置开关显隐，不可触摸、不影响操作）。 */
+    private val debugOverlay = DebugOverlayController(appContext, debugStates)
 
     // region 记账与恢复状态
 
@@ -98,10 +146,12 @@ class GuardCoordinator(
         jobs = listOf(
             scope.launch { tickLoop() },
             scope.launch { monitor.state.collect { onForegroundApp(it) } },
+            scope.launch { monitor.visiblePackages.collect { onVisiblePackages(it) } },
             scope.launch { repository.groupSnapshot.collect { onRulesChanged(it) } },
             scope.launch { repository.configUpdates.collect { onConfigUpdate(it) } },
             scope.launch { catalog.apps.collect { rulesSnapshot?.let(::onRulesChanged) } },
             scope.launch { settings.detectionMode.collect { switchMode(it) } },
+            scope.launch { settings.debugMode.collect { debugOverlay.setVisible(it) } },
         )
         // 先载入记账与恢复数据，再对账创建状态机
         scope.launch {
@@ -132,6 +182,14 @@ class GuardCoordinator(
         machineJobs.clear()
         lastForeground = null
         rulesSnapshot = null
+        _notificationUsage.value = null
+        pendingLeaves.values.forEach { it.cancel() }
+        pendingLeaves.clear()
+        foregroundMachines.clear()
+        visibleMachinePkgs = emptySet()
+        debugEntries.clear()
+        _debugStates.value = emptyList()
+        debugOverlay.setVisible(false)
         // 复位记账/恢复引导状态：再次 start() 时重新载入，避免沿用本进程上个会话的残留缓存
         bootstrapped = false
         restoredStates = emptyMap()
@@ -169,18 +227,125 @@ class GuardCoordinator(
     // region 前台事件
 
     private fun onForegroundApp(app: ForegroundApp?) {
-        val prev = lastForeground
         val next = app?.packageName
-        lastForeground = next
-
-        if (prev != null && prev != next) {
-            machines[prev]?.let { translate(prev, it.dispatch(GuardEvent.Backgrounded)) }
+        if (next == null) {
+            // 息屏/监视器复位：无瞬态混淆空间，全部机器立即退后台
+            pendingLeaves.values.forEach { it.cancel() }
+            pendingLeaves.clear()
+            for (pkg in foregroundMachines.toList()) dispatchLeave(pkg, force = true)
+            return
         }
-
-        if (next == null) return
+        // 原应用窗口重新夺回焦点（瞬态窗口消失后的回声）：确认作废，机器保持前台
+        pendingLeaves.remove(next)?.cancel()
+        if (next in foregroundMachines) return // 同包重报：去重
         Log.d(TAG, "dispatch ForegroundEntered pkg=$next machine=${machines.containsKey(next)}")
-        machines[next]?.let { translate(next, it.dispatch(GuardEvent.ForegroundEntered)) }
+        machines[next]?.let {
+            foregroundMachines.add(next)
+            translate(next, it.dispatch(GuardEvent.ForegroundEntered))
+        }
+        // 焦点离开的旧机器：挂起确认——异包报告可能是瞬态系统窗口（音量条等）伪装成切换，
+        // 它没有 UsageStats 记录；证实确有新前台事件才派发 Backgrounded（ADR 0003）。
+        val prev = lastForeground
+        if (prev != null && prev != next && prev in foregroundMachines && prev !in pendingLeaves && machines.containsKey(prev)) {
+            pendLeave(prev)
+        }
+        lastForeground = next
+        refreshNotificationUsage()
         // 非守护应用（无状态机）绝不弹浮层
+    }
+
+    /** 可见窗口集合变化（无障碍扫描）：被管理应用的窗口可见即视为前台（分屏/自由窗口拦截）。 */
+    private fun onVisiblePackages(packages: Set<String>) {
+        val withMachines = packages.filterTo(HashSet()) { machines.containsKey(it) }
+        val previous = visibleMachinePkgs
+        visibleMachinePkgs = withMachines
+        for (pkg in withMachines) {
+            if (pkg in foregroundMachines) continue
+            Log.d(TAG, "dispatch ForegroundEntered (visible window) pkg=$pkg")
+            machines[pkg]?.let {
+                foregroundMachines.add(pkg)
+                translate(pkg, it.dispatch(GuardEvent.ForegroundEntered))
+            }
+        }
+        for (pkg in previous) {
+            // 窗口消失是退后台的直接证据，不走挂起确认（连带取消在途确认）
+            if (pkg !in withMachines && pkg in foregroundMachines) {
+                Log.d(TAG, "dispatch Backgrounded (window gone) pkg=$pkg")
+                dispatchLeave(pkg, force = true)
+            }
+        }
+        refreshNotificationUsage()
+    }
+
+    /**
+     * 退后台挂起确认：短候轮询 UsageStats，出现"新应用前台事件 + 原应用暂停记录"即证实
+     * 真实切换；仅见新应用事件而原应用始终无暂停记录（被强杀/崩溃）超过安全窗后强制放行；
+     * 两者皆无（音量条等瞬态窗口）则视为误报丢弃，浮层与计时如常。真实切换的代价是
+     * 退后台判定晚约 1–2 秒，会话/冷却误差可忽略。
+     */
+    private fun pendLeave(pkg: String) {
+        Log.d(TAG, "leave pending (await usage evidence) pkg=$pkg")
+        pendingLeaves[pkg]?.cancel()
+        // 回看窗回溯 2 秒：容纳事件落账延迟，又排除挂起前与本切换无关的旧事件
+        val since = System.currentTimeMillis() - LEAVE_CONFIRM_STEP_MILLIS - LEAVE_EVIDENCE_BACKDATE_MILLIS
+        pendingLeaves[pkg] = scope.launch {
+            var sawForeignResume = false
+            var waited = 0L
+            while (waited < LEAVE_CONFIRM_FORCE_MILLIS) {
+                delay(LEAVE_CONFIRM_STEP_MILLIS)
+                waited += LEAVE_CONFIRM_STEP_MILLIS
+                val evidence = PollingForegroundDetector.foregroundSwitchEvidence(appContext, pkg, since)
+                if (evidence.foreignResumed) sawForeignResume = true
+                if (evidence.confirmed) {
+                    Log.d(TAG, "leave confirmed pkg=$pkg")
+                    pendingLeaves.remove(pkg)
+                    dispatchLeave(pkg, force = false)
+                    return@launch
+                }
+            }
+            pendingLeaves.remove(pkg)
+            if (sawForeignResume) {
+                Log.d(TAG, "leave force-accepted (no pause record) pkg=$pkg")
+                dispatchLeave(pkg, force = false)
+            } else {
+                Log.d(TAG, "leave dropped (transient window) pkg=$pkg")
+            }
+        }
+    }
+
+    /** 派发退后台；[force] = false 时若窗口仍可见（分屏/自由窗口）则抑制。 */
+    private fun dispatchLeave(pkg: String, force: Boolean) {
+        if (!force && pkg in visibleMachinePkgs) {
+            Log.d(TAG, "leave suppressed (window still visible) pkg=$pkg")
+            return
+        }
+        pendingLeaves.remove(pkg)?.cancel()
+        if (!foregroundMachines.remove(pkg)) return
+        machines[pkg]?.let { translate(pkg, it.dispatch(GuardEvent.Backgrounded)) }
+        refreshNotificationUsage()
+    }
+
+    /**
+     * 刷新通知用量载荷：优先取焦点所在机器，其余前台机器兜底——发布首个处于
+     * 会话中（RUNNING）/ 延时中（EXTENSION_RUNNING）且剩余非空者的活动剩余。
+     * StateFlow 按值去重，调用方无需判变。
+     */
+    private fun refreshNotificationUsage() {
+        val candidates = buildList {
+            lastForeground?.let { if (it in foregroundMachines) add(it) }
+            foregroundMachines.forEach { if (it !in this) add(it) }
+        }
+        for (pkg in candidates) {
+            val snapshot = machines[pkg]?.snapshot?.value ?: continue
+            val remaining = snapshot.remainingMillis
+            if ((snapshot.state == GuardState.RUNNING || snapshot.state == GuardState.EXTENSION_RUNNING) &&
+                remaining != null && remaining > 0L
+            ) {
+                _notificationUsage.value = NotificationUsage(catalog.appName(pkg), remaining)
+                return
+            }
+        }
+        _notificationUsage.value = null
     }
 
     // endregion
@@ -225,7 +390,14 @@ class GuardCoordinator(
                     overlayManager.show(packageName, catalog.appName(packageName), effect.spec)
                 GuardEffect.HideOverlay -> overlayManager.hide(packageName)
                 is GuardEffect.ShowToast -> showToast(effect.toast)
-                GuardEffect.GoHome -> exitAction.goToHome()
+                GuardEffect.GoHome -> {
+                    // 主动回桌面：机器即刻退出前台态（随后不会也不必再有退后台事件），
+                    // 此处兜底关闭浮层（额度用尽的确定路径无 HideOverlay 效果）
+                    foregroundMachines.remove(packageName)
+                    pendingLeaves.remove(packageName)?.cancel()
+                    overlayManager.hide(packageName)
+                    exitAction.goToHome()
+                }
                 GuardEffect.FlushState -> flush(packageName)
             }
         }
@@ -270,6 +442,9 @@ class GuardCoordinator(
     // region 检测模式切换（ticket 09）
 
     private fun switchMode(mode: DetectionMode) {
+        // 「↻ 刷新」逃生门仅轮询模式暴露：无障碍模式下事件源与前台判定本就一致，
+        // 且 UsageStats 落账有约 1 秒延迟——刚打开应用时点刷新会误判关闭浮层，反成绕过口子。
+        overlayManager.setRefreshEnabled(mode == DetectionMode.POLLING)
         when (mode) {
             DetectionMode.POLLING -> {
                 // 有使用情况访问权限才拉起轮询服务；未授权时由设置页引导卡走授权流程
@@ -378,8 +553,9 @@ class GuardCoordinator(
         machineJobs[pkg] = scope.launch {
             machine.snapshot.collect { snapshot -> syncOverlayFromSnapshot(pkg, snapshot) }
         }
-        // 规则热更新时该应用可能已在前台：补发进入前台事件
-        if (monitor.state.value?.packageName == pkg) {
+        // 规则热更新时该应用可能已在前台（焦点或可见窗口）：补发进入前台事件
+        if (monitor.state.value?.packageName == pkg || pkg in visibleMachinePkgs) {
+            foregroundMachines.add(pkg)
             translate(pkg, machine.dispatch(GuardEvent.ForegroundEntered))
         }
     }
@@ -393,6 +569,10 @@ class GuardCoordinator(
         machineJobs.remove(pkg)?.cancel()
         machines.remove(pkg)
         machineConfigs.remove(pkg)
+        pendingLeaves.remove(pkg)?.cancel()
+        foregroundMachines.remove(pkg)
+        debugEntries.remove(pkg)
+        publishDebugStates()
         overlayManager.hide(pkg)
         usedTodayCache[pkg] = usedToday // 同步回写：换组紧接 createMachine 时当日累计不回退
         scope.launch {
@@ -404,6 +584,22 @@ class GuardCoordinator(
     /** 浮层内容以状态机快照收敛（效果路径之外的兜底，同时驱动冷却倒计时等刷新）。 */
     private fun syncOverlayFromSnapshot(pkg: String, snapshot: GuardSnapshot) {
         overlayManager.syncFromMachine(pkg, catalog.appName(pkg), snapshot.overlay, snapshot.remainingMillis)
+        refreshNotificationUsage() // 会话/延时剩余逐秒推进：常驻通知随快照刷新
+        debugEntries[pkg] = MachineDebugEntry(
+            appName = catalog.appName(pkg),
+            state = snapshot.state,
+            remainingMillis = snapshot.remainingMillis,
+            usedTodayMillis = snapshot.usedTodayMillis,
+        )
+        publishDebugStates()
+    }
+
+    /** 发布调试数据：活动状态在前（剩余升序），闲置在后，应用名次序稳定。 */
+    private fun publishDebugStates() {
+        _debugStates.value = debugEntries.values
+            .sortedWith(
+                compareBy({ it.state == GuardState.INACTIVE }, { it.remainingMillis ?: Long.MAX_VALUE }, { it.appName }),
+            )
     }
 
     // endregion
@@ -414,5 +610,14 @@ class GuardCoordinator(
 
         /** 记账节流周期（tick 数）：约每 10 秒全量落盘一次，状态切换时另有即时落盘。 */
         const val FLUSH_EVERY_TICKS = 10L
+
+        /** 退后台挂起确认的轮询步长（毫秒）。 */
+        const val LEAVE_CONFIRM_STEP_MILLIS = 500L
+
+        /** 退后台挂起确认的强制放行安全窗（毫秒）：应用被强杀永远等不到暂停记录（与轮询检测一致）。 */
+        const val LEAVE_CONFIRM_FORCE_MILLIS = 10_000L
+
+        /** 切换证据回看窗的回溯量（毫秒）：容纳 UsageStats 落账延迟，排除挂起前的无关旧事件。 */
+        const val LEAVE_EVIDENCE_BACKDATE_MILLIS = 2_000L
     }
 }

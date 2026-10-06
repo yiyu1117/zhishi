@@ -15,8 +15,9 @@ import kotlinx.coroutines.flow.asStateFlow
 
 /**
  * 无障碍前台检测 provider（ADR 0001 默认模式）。
- * 只消费 TYPE_WINDOW_STATE_CHANGED 事件里的包名（canRetrieveWindowContent=false），
- * 通过 [ForegroundDetector] 契约喂给 [ForegroundMonitor]。
+ * 消费 TYPE_WINDOW_STATE_CHANGED 事件里的包名作为焦点前台（不读窗口内容，仅取根节点包名），
+ * 并扫描可见窗口集合喂给 [ForegroundMonitor]——分屏/自由窗口中被管理应用未获焦也据此拦截
+ * （ADR 0003）。通过 [ForegroundDetector] 契约喂给 [ForegroundMonitor]。
  */
 open class ZhishiAccessibilityService : AccessibilityService(), ForegroundDetector {
 
@@ -44,6 +45,33 @@ open class ZhishiAccessibilityService : AccessibilityService(), ForegroundDetect
         val pkg = event.packageName?.toString() ?: return
         Log.d(TAG, "a11y event pkg=$pkg")
         listener?.onForegroundChanged(pkg)
+        scanVisibleWindows()
+    }
+
+    /**
+     * 可见窗口扫描（ADR 0003）：窗口开启/关闭/焦点变化都伴随窗口状态事件，逐事件
+     * 汇总屏幕上全部窗口的归属包名上报，监视器去重后供协调器实现"可见即前台"
+     * （分屏/自由窗口中未获焦的被管理应用也要拦截）。需 flagRetrieveInteractiveWindows；
+     * 标志未生效（旧绑定）时 windows 为空列表，等价于不提供该信号。
+     */
+    private fun scanVisibleWindows() {
+        val windowList = windows ?: return
+        if (windowList.isEmpty()) return
+        val packages = HashSet<String>(windowList.size)
+        for (window in windowList) {
+            try {
+                val root = window.root
+                root?.packageName?.toString()?.let(packages::add)
+                @Suppress("DEPRECATION") // API 26–32 必须回收节点，33+ 为空操作
+                root?.recycle()
+            } catch (_: Exception) {
+                // 窗口可能正被系统回收
+            } finally {
+                @Suppress("DEPRECATION") // API 26–32 必须回收窗口，33+ 为空操作
+                window.recycle()
+            }
+        }
+        listener?.onVisiblePackagesChanged(packages)
     }
 
     override fun onInterrupt() = Unit
