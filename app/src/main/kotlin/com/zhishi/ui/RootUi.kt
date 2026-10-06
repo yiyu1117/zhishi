@@ -6,6 +6,14 @@ import android.content.Intent
 import android.net.Uri
 import android.provider.Settings
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -203,6 +211,14 @@ internal sealed interface Screen {
     data object Settings : Screen
 }
 
+/** 屏幕层级：转场动画按深度决定滑动方向（进 deeper 从右滑入，返回从左滑入）。 */
+private fun Screen.depth(): Int = when (this) {
+    Screen.Groups -> 0
+    is Screen.GroupDetail -> 1
+    is Screen.AppPicker -> 2
+    Screen.Settings -> 1
+}
+
 @Composable
 internal fun MainScreen() {
     var screen by remember { mutableStateOf<Screen>(Screen.Groups) }
@@ -216,22 +232,38 @@ internal fun MainScreen() {
         }
     }
     Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-        when (val current = screen) {
-            Screen.Groups -> GroupListScreen(
-                onOpenGroup = { screen = Screen.GroupDetail(it) },
-                onOpenSettings = { screen = Screen.Settings },
-                onPickApps = { screen = Screen.AppPicker(it) },
-            )
-            is Screen.GroupDetail -> GroupDetailScreen(
-                groupId = current.groupId,
-                onBack = { screen = Screen.Groups },
-                onPickApps = { screen = Screen.AppPicker(current.groupId) },
-            )
-            is Screen.AppPicker -> AppPickerScreen(
-                groupId = current.groupId,
-                onBack = { screen = Screen.GroupDetail(current.groupId) },
-            )
-            Screen.Settings -> SettingsScreen(onBack = { screen = Screen.Groups })
+        AnimatedContent(
+            targetState = screen,
+            transitionSpec = {
+                val forward = targetState.depth() >= initialState.depth()
+                val enter = slideInHorizontally(spring(stiffness = Spring.StiffnessMediumLow)) {
+                    if (forward) it else -it
+                } + fadeIn(spring(stiffness = Spring.StiffnessMediumLow))
+                val exit = slideOutHorizontally(spring(stiffness = Spring.StiffnessMediumLow)) {
+                    if (forward) -it / 3 else it / 3
+                } + fadeOut(spring(stiffness = Spring.StiffnessMediumLow))
+                enter togetherWith exit
+            },
+            contentKey = { it::class },
+            label = "screen",
+        ) { current ->
+            when (val s = current) {
+                Screen.Groups -> GroupListScreen(
+                    onOpenGroup = { screen = Screen.GroupDetail(it) },
+                    onOpenSettings = { screen = Screen.Settings },
+                    onPickApps = { screen = Screen.AppPicker(it) },
+                )
+                is Screen.GroupDetail -> GroupDetailScreen(
+                    groupId = s.groupId,
+                    onBack = { screen = Screen.Groups },
+                    onPickApps = { screen = Screen.AppPicker(s.groupId) },
+                )
+                is Screen.AppPicker -> AppPickerScreen(
+                    groupId = s.groupId,
+                    onBack = { screen = Screen.GroupDetail(s.groupId) },
+                )
+                Screen.Settings -> SettingsScreen(onBack = { screen = Screen.Groups })
+            }
         }
     }
 }
