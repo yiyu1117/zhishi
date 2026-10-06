@@ -450,6 +450,7 @@ class GuardCoordinator(
             is ToastEvent.TimeRemaining -> "距离结束还有 ${toast.remainingMinutes} 分钟"
             is ToastEvent.ExtensionPrewarn -> "延时还剩 ${toast.secondsLeft} 秒，结束后将锁定"
         }
+        AppLog.i(TAG, "提醒：$message")
         Toast.makeText(appContext, message, Toast.LENGTH_SHORT).show()
     }
 

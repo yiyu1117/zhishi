@@ -19,7 +19,8 @@ import kotlinx.coroutines.flow.StateFlow
  * - **实际到期** = min(会话剩余, 当日剩余额度)；额度先尽立即中断（同刻打平按额度耗尽处理）。
  * - **延时**：每会话一次；从冷却浮层发起时冻结冷却剩余（pending），延时结束回到 TIME_UP，
  *   之后确定/离开均按 pending 剩余继续冷却；从 TIME_UP 直接发起（冷却未开始）则退出时进满额到期冷却。
- * - **提醒**：仅前台消耗期间产生；同刻撞点剩余提醒优先，周期提示顺延到下一个消耗步。
+ * - **提醒**：仅前台消耗期间产生；同刻撞点剩余提醒优先；一旦剩余提醒触发过，
+ *   本会话后续周期提示一律抑制（设计草稿规则）。
  * - 宽限期补偿时若发生过冲（overshoot），把过冲时间计入随后开始的放弃冷却（与连续 Tick 等价）。
  */
 class DefaultGuardStateMachine(
@@ -53,6 +54,12 @@ class DefaultGuardStateMachine(
 
     /** 会话前台累计（周期用量提示的计时基数，RUNNING 与 EXTENSION_RUNNING 均累计）。 */
     private var usageElapsedMillis: Long = 0L
+
+    /**
+     * 剩余提醒是否已在本会话触发过。设计规则（设计草稿）：剩余提醒优先于已用提醒，
+     * 且一旦触发过，本会话后续所有"已用 X 分钟"提示一律不显示（含撞点当步与顺延补发）。
+     */
+    private var usageToastsSuppressed = false
 
     /** 撞点顺延的周期提示（分钟值队列），在下一个无撞点的消耗步补发。 */
     private val deferredUsageToasts = ArrayDeque<Int>()
@@ -147,6 +154,7 @@ class DefaultGuardStateMachine(
             emptyList()
         }
         for (mark in newMarks) effects += GuardEffect.ShowToast(ToastEvent.TimeRemaining(mark))
+        if (newMarks.isNotEmpty()) usageToastsSuppressed = true
 
         emitUsageToasts(effects, crossedUsageBoundaries(usageBefore, usageElapsedMillis), collision = newMarks.isNotEmpty())
 
@@ -316,6 +324,7 @@ class DefaultGuardStateMachine(
         extensionRemainingMillis = 0L
         firedReminderMarks.clear()
         deferredUsageToasts.clear()
+        usageToastsSuppressed = false
         usageElapsedMillis = 0L
         pendingCooldownKind = null
         sessionRemainingMillis = minOf(minutes * 60_000L, quota ?: Long.MAX_VALUE)
@@ -506,10 +515,15 @@ class DefaultGuardStateMachine(
     }
 
     /**
-     * 周期提示发射：与剩余提醒同刻撞点时剩余优先，周期提示顺延到下一个无撞点的消耗步补发。
+     * 周期提示发射：与剩余提醒同刻撞点时剩余优先；设计规则——一旦本会话触发过剩余
+     * 提醒，后续所有周期提示（含撞点当步与此前顺延的）一律不显示。
      */
     private fun emitUsageToasts(effects: MutableCollection<GuardEffect>, newBoundaries: List<Int>, collision: Boolean) {
         if (!config.mechanismEnabled(Mechanism.USAGE_TOAST)) {
+            deferredUsageToasts.clear()
+            return
+        }
+        if (usageToastsSuppressed) {
             deferredUsageToasts.clear()
             return
         }

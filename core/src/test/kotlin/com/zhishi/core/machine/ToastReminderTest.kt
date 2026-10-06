@@ -41,9 +41,9 @@ class ToastReminderTest {
         assertIs<GuardEffect.ShowOverlay>(expiry.single())
     }
 
-    /** 撞点时只弹一条：剩余提醒优先，周期提示顺延到下一个 Tick。 */
+    /** 撞点时只弹一条：剩余提醒优先；且此后本会话的周期提示全部抑制。 */
     @Test
-    fun `撞点时剩余提醒优先周期提示顺延`() {
+    fun `撞点时剩余提醒优先且此后周期提示全抑制`() {
         val clock = FakeClock()
         // 会话 15 分钟，周期 10 分钟，刻度 5/2/1：第 10 分钟同时是"剩 5 分钟"刻度点
         val machine = newMachine(
@@ -55,8 +55,29 @@ class ToastReminderTest {
         val atCollision = tickAfter(machine, clock, 600_000L)
         assertEquals(listOf(ToastEvent.TimeRemaining(5)), toasts(atCollision))
 
-        val nextTick = tickAfter(machine, clock, 1_000L)
-        assertEquals(listOf(ToastEvent.UsagePeriod(10)), toasts(nextTick))
+        // 剩余提醒已触发：顺延的"已用 10 分钟"不再显示
+        assertEquals(emptyList(), toasts(tickAfter(machine, clock, 1_000L)))
+    }
+
+    /** 设计示例：33 分钟会话，28 分钟提示剩 5 分钟后，30 分钟的"已用 30 分钟"不显示。 */
+    @Test
+    fun `剩余提醒触发后已用提醒一律不显示`() {
+        val clock = FakeClock()
+        val machine = newMachine(
+            testConfig(Mechanism.TIME_SELECTION, Mechanism.USAGE_TOAST, Mechanism.TIME_REMINDER),
+            clock,
+        )
+        startSession(machine, 33)
+
+        assertEquals(listOf(ToastEvent.UsagePeriod(10)), toasts(tickAfter(machine, clock, 10 * 60_000L)))
+        assertEquals(listOf(ToastEvent.UsagePeriod(20)), toasts(tickAfter(machine, clock, 10 * 60_000L)))
+        // 第 28 分钟：剩 5 分钟刻度触发
+        assertEquals(emptyList(), toasts(tickAfter(machine, clock, 7 * 60_000L)))
+        assertEquals(listOf(ToastEvent.TimeRemaining(5)), toasts(tickAfter(machine, clock, 60_000L)))
+        // 第 30 分钟的"已用 30 分钟"被抑制；后续仅剩剩余刻度（2/1 分钟）
+        assertEquals(emptyList(), toasts(tickAfter(machine, clock, 90_000L)))
+        assertEquals(listOf(ToastEvent.TimeRemaining(2)), toasts(tickAfter(machine, clock, 90_000L)))
+        assertEquals(listOf(ToastEvent.TimeRemaining(1)), toasts(tickAfter(machine, clock, 60_000L)))
     }
 
     /** 提醒刻度可在设置中增删：只保留 3 分钟刻度。 */

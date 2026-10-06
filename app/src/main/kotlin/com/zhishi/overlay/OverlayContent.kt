@@ -307,9 +307,9 @@ private fun TimeSelectionOverlay(
         }
 
         Spacer(Modifier.height(28.dp))
-        // 主动退出：未开始会话、无冷却语义，直接送回桌面
-        ProtectedButton("退出（返回桌面）", protection, spec.quickProtectMillis) {
-            interactions.onConfirmExit(content.packageName)
+        // 主动退出：未开始会话、无冷却语义，直接送回桌面；逃生门不受按钮保护计时约束
+        Button(onClick = { interactions.onConfirmExit(content.packageName) }) {
+            Text("退出（返回桌面）", fontSize = 17.sp)
         }
     }
 }
