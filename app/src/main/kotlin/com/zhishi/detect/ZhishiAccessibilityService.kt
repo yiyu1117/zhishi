@@ -19,6 +19,11 @@ import kotlinx.coroutines.flow.asStateFlow
  * 消费 TYPE_WINDOW_STATE_CHANGED 事件里的包名作为焦点前台（不读窗口内容，仅取根节点包名），
  * 并扫描可见窗口集合喂给 [ForegroundMonitor]——分屏/自由窗口中被管理应用未获焦也据此拦截
  * （ADR 0003）。通过 [ForegroundDetector] 契约喂给 [ForegroundMonitor]。
+ *
+ * 焦点校验（v1.1.1）：事件包名必须等于当前焦点窗口的根包名才认作前台切换。
+ * 背景应用的窗口事件（任务重排、SDK 弹窗、退后台后的播放恢复等）不代表前台切换，
+ * 不校验会把"人在桌面"误判成"应用回前台"→ 从闲置态重入弹出浮层。窗口扫描
+ * （[flagRetrieveInteractiveWindows]）不可用时退回旧行为，事件照报。
  */
 open class ZhishiAccessibilityService : AccessibilityService(), ForegroundDetector {
 
@@ -45,24 +50,32 @@ open class ZhishiAccessibilityService : AccessibilityService(), ForegroundDetect
         if (event == null || event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
         val pkg = event.packageName?.toString() ?: return
         AppLog.d(TAG, "窗口事件 pkg=$pkg")
+        val scan = scanWindows()
+        if (scan != null) listener?.onVisiblePackagesChanged(scan.visiblePackages)
+        val focused = scan?.focusedPackage
+        if (focused != null && focused != pkg) {
+            AppLog.d(TAG, "丢弃事件 pkg=$pkg（焦点在 $focused）")
+            return
+        }
         listener?.onForegroundChanged(pkg)
-        scanVisibleWindows()
     }
 
     /**
-     * 可见窗口扫描（ADR 0003）：窗口开启/关闭/焦点变化都伴随窗口状态事件，逐事件
-     * 汇总屏幕上全部窗口的归属包名上报，监视器去重后供协调器实现"可见即前台"
-     * （分屏/自由窗口中未获焦的被管理应用也要拦截）。需 flagRetrieveInteractiveWindows；
-     * 标志未生效（旧绑定）时 windows 为空列表，等价于不提供该信号。
+     * 单次窗口扫描：汇总屏幕上全部窗口的归属包名，并取焦点窗口的包名。
+     * 需 flagRetrieveInteractiveWindows；标志未生效（旧绑定）时 windows 为空列表，
+     * 返回 null（等价于不提供可见窗口与焦点信号，事件退回旧行为照报）。
      */
-    private fun scanVisibleWindows() {
-        val windowList = windows ?: return
-        if (windowList.isEmpty()) return
+    private fun scanWindows(): WindowScan? {
+        val windowList = windows ?: return null
+        if (windowList.isEmpty()) return null
         val packages = HashSet<String>(windowList.size)
+        var focusedPackage: String? = null
         for (window in windowList) {
             try {
                 val root = window.root
-                root?.packageName?.toString()?.let(packages::add)
+                val pkg = root?.packageName?.toString()
+                pkg?.let(packages::add)
+                if (window.isFocused && focusedPackage == null) focusedPackage = pkg
                 @Suppress("DEPRECATION") // API 26–32 必须回收节点，33+ 为空操作
                 root?.recycle()
             } catch (_: Exception) {
@@ -72,8 +85,11 @@ open class ZhishiAccessibilityService : AccessibilityService(), ForegroundDetect
                 window.recycle()
             }
         }
-        listener?.onVisiblePackagesChanged(packages)
+        return WindowScan(packages, focusedPackage)
     }
+
+    /** 单次窗口扫描结果：可见窗口包名集合 + 焦点窗口的根包名（可能为 null：无窗口持焦）。 */
+    private data class WindowScan(val visiblePackages: Set<String>, val focusedPackage: String?)
 
     override fun onInterrupt() = Unit
 
