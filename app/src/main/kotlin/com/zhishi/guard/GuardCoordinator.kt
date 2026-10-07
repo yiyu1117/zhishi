@@ -19,6 +19,7 @@ import com.zhishi.core.model.Group
 import com.zhishi.core.model.GroupConfig
 import com.zhishi.core.model.GroupKind
 import com.zhishi.core.model.isForbiddenByQuota
+import com.zhishi.core.model.scaledByPercent
 import com.zhishi.core.time.AppClock
 import com.zhishi.data.AppCatalog
 import com.zhishi.data.GroupConfigUpdate
@@ -440,7 +441,43 @@ class GuardCoordinator(
                     exitAction.goToHome()
                 }
                 GuardEffect.FlushState -> flush(packageName)
+                is GuardEffect.CooldownStarted -> maybeShareCooldown(packageName, effect)
             }
+        }
+    }
+
+    /** 分组成员解析：分配键命中 + 默认组兜底所有未分配的用户应用（共享分发与配置热更新共用）。 */
+    private fun membersOf(groupId: String, assigned: Map<String, String>): List<String> = buildList {
+        assigned.filterValues { it == groupId }.keys.forEach(::add)
+        if (groupId == GroupIds.DEFAULT) {
+            catalog.userPackages().filter { it !in assigned }.forEach(::add)
+        }
+    }
+
+    /**
+     * 同组共享冷却分发（v1.1）：某应用的冷却开始时，若其分组开启了共享，
+     * 按比例折算后分发给组内处于闲置/待选择的成员（状态机侧二次把关，不会打断
+     * 进行中的会话/宽限/冷却）。仅此一跳：共享冷却的注入不产生 CooldownStarted，不链式传染。
+     */
+    private fun maybeShareCooldown(origin: String, started: GuardEffect.CooldownStarted) {
+        val config = machineConfigs[origin] ?: return
+        if (!config.time.sharedCooldownEnabled) return
+        val sharedMillis = scaledByPercent(started.durationMillis, config.time.sharedCooldownPercent)
+        if (sharedMillis <= 0L) return
+        val snapshot = rulesSnapshot ?: return
+        val members = membersOf(snapshot.assignments[origin] ?: GroupIds.DEFAULT, snapshot.assignments)
+        var shared = 0
+        for (pkg in members) {
+            if (pkg == origin || pkg !in machines) continue
+            machines[pkg]?.applySharedCooldown(started.kind, sharedMillis)
+            shared++
+        }
+        if (shared > 0) {
+            AppLog.i(
+                TAG,
+                "共享冷却 pkg=$origin kind=${started.kind} " +
+                    "${started.durationMillis / 60_000.0}分 → $shared 个成员 ${sharedMillis / 60_000.0}分",
+            )
         }
     }
 
@@ -550,15 +587,7 @@ class GuardCoordinator(
     /** 配置级更新回调（repository 暴露）：不换组时调用机器 onConfigUpdated，不清状态。 */
     private fun onConfigUpdate(update: GroupConfigUpdate) {
         val snapshot = rulesSnapshot ?: return
-        val assigned = snapshot.assignments
-        val members = buildList {
-            assigned.filterValues { it == update.groupId }.keys.forEach(::add)
-            if (update.groupId == GroupIds.DEFAULT) {
-                // 未分配的用户应用逻辑上属于默认组
-                catalog.userPackages().filter { it !in assigned }.forEach(::add)
-            }
-        }
-        for (pkg in members) {
+        for (pkg in membersOf(update.groupId, snapshot.assignments)) {
             val machine = machines[pkg] ?: continue
             if (machineConfigs[pkg] != update.config) {
                 machine.onConfigUpdated(update.config)
@@ -628,6 +657,7 @@ class GuardCoordinator(
         overlayManager.syncFromMachine(pkg, catalog.appName(pkg), snapshot.overlay, snapshot.remainingMillis)
         refreshNotificationUsage() // 会话/延时剩余逐秒推进：常驻通知随快照刷新
         debugEntries[pkg] = MachineDebugEntry(
+            packageName = pkg,
             appName = catalog.appName(pkg),
             state = snapshot.state,
             remainingMillis = snapshot.remainingMillis,
@@ -636,12 +666,18 @@ class GuardCoordinator(
         publishDebugStates()
     }
 
-    /** 发布调试数据：活动状态在前（剩余升序），闲置在后，应用名次序稳定。 */
+    /**
+     * 发布调试数据：活动状态在前（剩余升序），闲置在后，应用名次序稳定。
+     * 逐条比对去重：配置热更新会让组内全部机器重发快照，但调试条目内容未变，
+     * 直接赋值会以 O(N²) 重建整面板（设置保存卡顿的元凶之一）。
+     */
     private fun publishDebugStates() {
-        _debugStates.value = debugEntries.values
+        val next = debugEntries.values
             .sortedWith(
                 compareBy({ it.state == GuardState.INACTIVE }, { it.remainingMillis ?: Long.MAX_VALUE }, { it.appName }),
             )
+        if (next == _debugStates.value) return
+        _debugStates.value = next
     }
 
     // endregion

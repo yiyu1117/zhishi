@@ -30,7 +30,7 @@ class DailyLimitAndLedgerTest {
         assertNull(snapshot.remainingMillis)
     }
 
-    /** 所选时长先尽（额度充裕）→ 正常 TIME_UP 而非额度中断。 */
+    /** 所选时长先尽（额度充裕）→ 正常到期（原地回时间选择）而非额度中断。 */
     @Test
     fun `所选时长先尽则正常到时而非额度中断`() {
         val clock = FakeClock()
@@ -39,8 +39,8 @@ class DailyLimitAndLedgerTest {
 
         tickAfter(machine, clock, 5 * 60_000L)
 
-        assertEquals(GuardState.TIME_UP, machine.snapshot.value.state)
-        assertIs<OverlaySpec.TimeUp>(machine.snapshot.value.overlay)
+        assertEquals(GuardState.AWAITING_SELECTION, machine.snapshot.value.state)
+        assertIs<OverlaySpec.TimeSelection>(machine.snapshot.value.overlay)
     }
 
     /** 额度用尽浮层：确定送回桌面并落盘（无 HideOverlay、无延时），停留额度用尽态。 */
@@ -85,7 +85,7 @@ class DailyLimitAndLedgerTest {
         assertNull(machine.snapshot.value.todayRemainingMinutes)
 
         tickAfter(machine, clock, 5 * 60_000L)
-        assertEquals(GuardState.TIME_UP, machine.snapshot.value.state)
+        assertEquals(GuardState.AWAITING_SELECTION, machine.snapshot.value.state)
     }
 
     /** 零点重置：额度用尽态在 DayChanged 后解除（用户不在应用内则静默回 INACTIVE）。 */

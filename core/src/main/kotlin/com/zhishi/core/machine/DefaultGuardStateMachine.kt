@@ -3,24 +3,34 @@ package com.zhishi.core.machine
 import com.zhishi.core.model.CooldownKind
 import com.zhishi.core.model.GroupConfig
 import com.zhishi.core.model.Mechanism
+import com.zhishi.core.model.abandonCooldownMillisFor
+import com.zhishi.core.model.expiryCooldownMillisFor
+import com.zhishi.core.model.gracePeriodMillisFor
 import com.zhishi.core.model.isForbiddenByQuota
 import com.zhishi.core.time.AppClock
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 
 /**
- * 守护状态机默认实现（ticket 03–07 的实现对象）。
+ * 守护状态机默认实现。
  *
  * 设计要点：
  * - **事件补偿**：每次 [dispatch] 先按当前状态的时间规则把内部时间线推进到 now，再处理事件；
  *   内部记录 [inForeground] 与 [lastProcessedMillis]。Tick 稀疏或事件间时间跳跃均安全。
- * - **冷却推进规则**：冷却倒计时仅当用户不处于该应用内（`!inForeground`）时推进；
- *   停留冷却浮层或延时使用期间冻结。
+ * - **冷却推进规则（v1.1）**：冷却倒计时按墙钟推进，与用户是否在应用内无关；
+ *   唯一冻结点是延时使用期间（延时以 EXTENSION_RUNNING 状态独立计时，冷却剩余冻结为 pending）。
+ *   冷却走完时用户若仍停留在应用内，原地按分组入口语义重入（选时/试探/直接计时）。
+ * - **到期即冷却（v1.1）**：会话自然到期不再有独立"时间已到"确认浮层，直接进入到期冷却；
+ *   冷却浮层兼作"时间已到"提示（副标题「时间已到，冷却中」），返回桌面按钮即刻可点。
+ * - **智能时长联动（v1.1）**：配置开启时，到期冷却/宽限期/放弃冷却分别按
+ *   实际前台消耗 / 开屏所选时长 / 放弃时实际已用 与比例计算（见 CoreModels 的 *For 扩展）。
  * - **实际到期** = min(会话剩余, 当日剩余额度)；额度先尽立即中断（同刻打平按额度耗尽处理）。
- * - **延时**：每会话一次；从冷却浮层发起时冻结冷却剩余（pending），延时结束回到 TIME_UP，
- *   之后确定/离开均按 pending 剩余继续冷却；从 TIME_UP 直接发起（冷却未开始）则退出时进满额到期冷却。
+ * - **延时**：每会话一次；从冷却浮层发起时冻结冷却剩余（pending），延时结束回到冷却
+ *   （按 pending 剩余续接，非满额）。
  * - **提醒**：仅前台消耗期间产生；同刻撞点剩余提醒优先；一旦剩余提醒触发过，
  *   本会话后续周期提示一律抑制（设计草稿规则）。
+ * - **延迟选时（v1.1）**：TRIAL_RUNNING 试探期前台计时（计入当日限额），退后台暂停；
+   中断超过保留期试探进度清零，期满弹时间选择浮层。
  * - 宽限期补偿时若发生过冲（overshoot），把过冲时间计入随后开始的放弃冷却（与连续 Tick 等价）。
  */
 class DefaultGuardStateMachine(
@@ -44,10 +54,19 @@ class DefaultGuardStateMachine(
 
     // ---- 会话相关（随新会话重置） ----
     private var sessionRemainingMillis: Long = 0L
+
+    /** 本会话开屏所选时长（智能宽限期的计算基数）。 */
+    private var sessionSelectedMillis: Long = 0L
     private var graceRemainingMillis: Long = 0L
     private var extensionRemainingMillis: Long = 0L
     private var extensionUsed: Boolean = false
     private var extensionPrewarnFired: Boolean = false
+
+    // ---- 延迟选时试探期（独立于会话） ----
+    private var trialRemainingMillis: Long = 0L
+
+    /** 试探期退后台的暂停时刻（epoch millis）；null = 未处于中断保留判定中。 */
+    private var trialPausedAtMillis: Long? = null
 
     /** 本会话已触发的剩余提醒刻度（每刻度每会话一次）。 */
     private val firedReminderMarks = mutableSetOf<Int>()
@@ -67,6 +86,9 @@ class DefaultGuardStateMachine(
     // ---- 冷却相关 ----
     private var cooldownKind: CooldownKind = CooldownKind.EXPIRY
     private var cooldownRemainingMillis: Long = 0L
+
+    /** 当前冷却是否为同组共享冷却（接收方，未使用过 → 浮层无延时按钮）。 */
+    private var cooldownShared: Boolean = false
 
     /** 延时发起前被冻结的冷却（kind + 剩余），延时结束后据此继续。 */
     private var pendingCooldownKind: CooldownKind? = null
@@ -112,8 +134,9 @@ class DefaultGuardStateMachine(
 
     /**
      * 事件补偿：把当前状态的时间规则推进到 now，返回迁移产生的效果。
-     * 前台消耗态仅在用户处于前台时消耗；冷却与宽限仅当用户不在应用内时推进
-     * （宽限的防线防止异常滞留 GRACE 时被 Tick 悄悄耗尽判成中途放弃）。
+     * 前台消耗态仅在用户处于前台时消耗；宽限仅当用户不在应用内时推进
+     * （宽限的防线防止异常滞留 GRACE 时被 Tick 悄悄耗尽判成中途放弃）；
+     * 冷却按墙钟推进，与用户是否在应用内无关（v1.1，停留浮层也走）。
      */
     private fun compensate(now: Long): List<GuardEffect> {
         val elapsed = now - lastProcessedMillis
@@ -122,9 +145,9 @@ class DefaultGuardStateMachine(
             GuardState.RUNNING -> consumeSession(elapsed)
             GuardState.EXTENSION_RUNNING -> consumeExtension(elapsed)
             GuardState.DIRECT_RUNNING -> consumeDirect(elapsed)
+            GuardState.TRIAL_RUNNING -> consumeTrial(elapsed)
             GuardState.GRACE -> if (!inForeground) advanceGrace(elapsed) else emptyList()
-            GuardState.EXPIRY_COOLDOWN, GuardState.ABANDON_COOLDOWN ->
-                if (!inForeground) advanceCooldown(elapsed) else emptyList()
+            GuardState.EXPIRY_COOLDOWN, GuardState.ABANDON_COOLDOWN -> advanceCooldown(elapsed)
             else -> emptyList()
         }
     }
@@ -160,7 +183,7 @@ class DefaultGuardStateMachine(
 
         when {
             quotaAfter != null && quotaAfter <= 0L -> enterQuotaExhausted(effects)
-            sessionRemainingMillis <= 0L -> enterTimeUp(effects)
+            sessionRemainingMillis <= 0L -> enterExpiryCooldown(effects)
         }
         return effects
     }
@@ -191,7 +214,7 @@ class DefaultGuardStateMachine(
 
         when {
             quotaAfter != null && quotaAfter <= 0L -> enterQuotaExhausted(effects)
-            extensionRemainingMillis <= 0L -> enterTimeUp(effects)
+            extensionRemainingMillis <= 0L -> enterExtensionEndCooldown(effects)
         }
         return effects
     }
@@ -207,6 +230,31 @@ class DefaultGuardStateMachine(
         return effects
     }
 
+    /**
+     * TRIAL_RUNNING（延迟选时试探期）：前台计时并记账，试探期满弹时间选择浮层。
+     * 无会话语义：无宽限/放弃/剩余提醒；周期用量提示照常（按本应用前台累计）。
+     */
+    private fun consumeTrial(elapsed: Long): List<GuardEffect> {
+        if (!inForeground || elapsed <= 0L) return emptyList()
+        val effects = mutableListOf<GuardEffect>()
+        val quotaBefore = config.remainingQuotaMillis(usedTodayMillis)
+        val usageBefore = usageElapsedMillis
+        val consumed = minOf(elapsed, trialRemainingMillis, quotaBefore ?: Long.MAX_VALUE)
+        trialRemainingMillis -= consumed
+        usedTodayMillis += consumed
+        usageElapsedMillis = usageBefore + consumed
+        emitUsageToasts(effects, crossedUsageBoundaries(usageBefore, usageElapsedMillis), collision = false)
+        val quotaAfter = config.remainingQuotaMillis(usedTodayMillis)
+        when {
+            quotaAfter != null && quotaAfter <= 0L -> enterQuotaExhausted(effects)
+            trialRemainingMillis <= 0L -> {
+                state = GuardState.AWAITING_SELECTION
+                effects += show(timeSelectionOverlay())
+            }
+        }
+        return effects
+    }
+
     // ------------------------------------------------------------------ 宽限与冷却推进
 
     /** GRACE：宽限倒计时推进；耗尽判中途放弃，过冲时间计入随后开始的放弃冷却。 */
@@ -216,25 +264,30 @@ class DefaultGuardStateMachine(
         if (graceRemainingMillis > 0L) return effects
         val overshoot = -graceRemainingMillis
         graceRemainingMillis = 0L
-        abandonSession(effects)
-        if (state == GuardState.EXPIRY_COOLDOWN || state == GuardState.ABANDON_COOLDOWN) {
-            cooldownRemainingMillis -= overshoot
-            if (cooldownRemainingMillis <= 0L) toInactive()
-        }
+        abandonSession(overshoot, effects)
         return effects
     }
 
-    /** 冷却推进（仅用户不在应用内时被调用）；自然结束回 INACTIVE，无效果。 */
+    /**
+     * 冷却推进（墙钟，与用户是否在应用内无关）：自然走完时若用户停留在应用内，
+     * 原地按分组入口语义重入（选时/试探/直接计时），否则回 INACTIVE 等下次进入。
+     */
     private fun advanceCooldown(elapsed: Long): List<GuardEffect> {
         cooldownRemainingMillis -= elapsed
-        if (cooldownRemainingMillis <= 0L) toInactive()
-        return emptyList()
+        if (cooldownRemainingMillis > 0L) return emptyList()
+        return completeCooldown()
     }
 
-    private fun toInactive() {
-        state = GuardState.INACTIVE
+    /** 冷却走完（或过冲耗尽）：清冷却态，前台停留时原地重入入口语义。 */
+    private fun completeCooldown(): List<GuardEffect> {
         cooldownRemainingMillis = 0L
+        cooldownShared = false
+        state = GuardState.INACTIVE
         currentOverlay = null
+        if (!inForeground) return emptyList()
+        val effects = mutableListOf<GuardEffect>(GuardEffect.HideOverlay)
+        effects += enterFromInactive()
+        return effects
     }
 
     // ------------------------------------------------------------------ 事件处理
@@ -245,12 +298,24 @@ class DefaultGuardStateMachine(
             GuardState.INACTIVE -> enterFromInactive()
             GuardState.AWAITING_SELECTION -> show(timeSelectionOverlay())
             GuardState.RUNNING, GuardState.DIRECT_RUNNING, GuardState.EXTENSION_RUNNING -> emptyList()
+            GuardState.TRIAL_RUNNING -> {
+                // 中断保留：退后台超过保留期试探进度清零，保留期内回来续计
+                val pausedAt = trialPausedAtMillis
+                trialPausedAtMillis = null
+                if (pausedAt != null &&
+                    clock.nowMillis() - pausedAt >= config.time.delayedSelectionRetentionMillis
+                ) {
+                    trialRemainingMillis = config.time.delayedSelectionMinutes * 60_000L
+                }
+                emptyList()
+            }
             GuardState.GRACE -> {
                 // 宽限期内回来：会话剩余保持，继续前台计时
                 state = GuardState.RUNNING
                 emptyList()
             }
-            GuardState.TIME_UP -> show(timeUpOverlay())
+            // 旧版遗留状态，恢复路径已转换；防御性兜底按入口语义重入
+            GuardState.TIME_UP -> enterFromInactive()
             GuardState.EXPIRY_COOLDOWN, GuardState.ABANDON_COOLDOWN -> show(cooldownOverlay())
             GuardState.QUOTA_EXHAUSTED -> show(quotaOverlay())
             GuardState.BLACKLISTED -> show(OverlaySpec.Forbidden)
@@ -261,39 +326,39 @@ class DefaultGuardStateMachine(
         inForeground = false
         return when (state) {
             GuardState.RUNNING -> {
-                // 退后台/息屏：会话计时暂停，宽限倒计时开始
+                // 退后台/息屏：会话计时暂停，宽限倒计时开始（智能联动按所选时长计算）
                 state = GuardState.GRACE
-                graceRemainingMillis = config.time.gracePeriodMillis
+                graceRemainingMillis = config.gracePeriodMillisFor(sessionSelectedMillis)
                 emptyList()
             }
             GuardState.GRACE, GuardState.INACTIVE, GuardState.DIRECT_RUNNING -> emptyList()
+            GuardState.TRIAL_RUNNING -> {
+                // 试探暂停：记录时刻供中断保留判定；无会话语义，无宽限/放弃
+                trialPausedAtMillis = clock.nowMillis()
+                emptyList()
+            }
+            GuardState.TIME_UP -> {
+                val had = currentOverlay != null
+                currentOverlay = null
+                if (had) listOf(GuardEffect.HideOverlay) else emptyList()
+            }
             GuardState.EXTENSION_RUNNING -> {
-                // 延时提前结束：按被冻结的冷却剩余继续（无 pending 则进满额到期冷却）
+                // 延时提前结束：按被冻结的冷却剩余继续（无 pending 则进满额到期冷却）；
+                // pending 续接不发 CooldownStarted（同一冷却 Episode）
                 extensionUsed = true
                 extensionRemainingMillis = 0L
                 val effects = mutableListOf<GuardEffect>()
                 val pendingKind = pendingCooldownKind
                 pendingCooldownKind = null
                 if (pendingKind != null) {
-                    enterCooldown(pendingKind, pendingCooldownRemainingMillis, effects, goHome = false, hideOverlay = true, flushState = false)
+                    enterCooldown(pendingKind, pendingCooldownRemainingMillis, effects, flushState = false, emitStarted = false)
                 } else {
-                    enterCooldown(CooldownKind.EXPIRY, config.time.expiryCooldownMillis, effects, goHome = false, hideOverlay = true, flushState = false)
-                }
-                effects
-            }
-            GuardState.TIME_UP -> {
-                // 用户自行离开：不 GoHome；有被冻结的冷却（延时后）按剩余续接，否则进满额到期冷却
-                val effects = mutableListOf<GuardEffect>()
-                val pendingKind = pendingCooldownKind
-                pendingCooldownKind = null
-                if (pendingKind != null) {
-                    enterCooldown(pendingKind, pendingCooldownRemainingMillis, effects, goHome = false, hideOverlay = true, flushState = false)
-                } else {
-                    enterCooldown(CooldownKind.EXPIRY, config.time.expiryCooldownMillis, effects, goHome = false, hideOverlay = true, flushState = false)
+                    enterCooldown(CooldownKind.EXPIRY, config.expiryCooldownMillisFor(usageElapsedMillis), effects, flushState = false)
                 }
                 effects
             }
             GuardState.EXPIRY_COOLDOWN, GuardState.ABANDON_COOLDOWN -> {
+                // 冷却照常推进（墙钟），仅隐藏浮层
                 val had = currentOverlay != null
                 currentOverlay = null
                 if (had) listOf(GuardEffect.HideOverlay) else emptyList()
@@ -327,7 +392,8 @@ class DefaultGuardStateMachine(
         usageToastsSuppressed = false
         usageElapsedMillis = 0L
         pendingCooldownKind = null
-        sessionRemainingMillis = minOf(minutes * 60_000L, quota ?: Long.MAX_VALUE)
+        sessionSelectedMillis = minutes * 60_000L
+        sessionRemainingMillis = minOf(sessionSelectedMillis, quota ?: Long.MAX_VALUE)
 
         state = GuardState.RUNNING
         currentOverlay = null
@@ -335,33 +401,20 @@ class DefaultGuardStateMachine(
     }
 
     private fun onConfirmExit(): List<GuardEffect> = when (state) {
-        GuardState.TIME_UP -> {
-            val effects = mutableListOf<GuardEffect>()
-            val pendingKind = pendingCooldownKind
-            pendingCooldownKind = null
-            if (pendingKind != null) {
-                // 延时来自冷却浮层：按冻结剩余继续该冷却
-                enterCooldown(pendingKind, pendingCooldownRemainingMillis, effects, goHome = true, hideOverlay = true, flushState = true)
-            } else {
-                // 冷却未开始（TIME_UP 停留/延时来自 TIME_UP）：进满额到期冷却
-                enterCooldown(CooldownKind.EXPIRY, config.time.expiryCooldownMillis, effects, goHome = true, hideOverlay = true, flushState = true)
-            }
-            // 确定后主动送回桌面，用户已不在应用内
-            inForeground = false
-            effects
-        }
         GuardState.QUOTA_EXHAUSTED -> {
             inForeground = false
             listOf(GuardEffect.GoHome, GuardEffect.FlushState)
         }
         GuardState.EXPIRY_COOLDOWN, GuardState.ABANDON_COOLDOWN -> {
-            // 冷却浮层的「返回桌面」：冷却照常推进（用户离开后不再冻结）
+            // 冷却浮层的「返回桌面」：冷却照常推进（墙钟，与是否在应用内无关）
             inForeground = false
             currentOverlay = null
             listOf(GuardEffect.GoHome, GuardEffect.HideOverlay, GuardEffect.FlushState)
         }
         GuardState.AWAITING_SELECTION -> {
-            // 时间选择浮层的「退出」：未开始会话，无冷却语义，仅送回桌面
+            // 时间选择浮层的「退出」：未开始会话，无冷却语义；回到闲置，
+            // 下次打开按入口语义重入（延迟选时组由此重新计满试探期）
+            state = GuardState.INACTIVE
             inForeground = false
             currentOverlay = null
             listOf(GuardEffect.GoHome, GuardEffect.HideOverlay)
@@ -372,15 +425,9 @@ class DefaultGuardStateMachine(
     private fun onExtensionRequested(): List<GuardEffect> {
         if (!config.mechanismEnabled(Mechanism.EXTENSION)) return emptyList()
         if (extensionUsed) return emptyList()
+        // 共享冷却的接收方未使用过，不提供延时（浮层按钮已隐藏，此处防御重复拦截）
+        if (cooldownShared) return emptyList()
         return when (state) {
-            GuardState.TIME_UP -> {
-                extensionUsed = true
-                extensionPrewarnFired = false
-                extensionRemainingMillis = config.time.extensionMinutes * 60_000L
-                state = GuardState.EXTENSION_RUNNING
-                currentOverlay = null
-                listOf(GuardEffect.HideOverlay)
-            }
             GuardState.EXPIRY_COOLDOWN, GuardState.ABANDON_COOLDOWN -> {
                 extensionUsed = true
                 extensionPrewarnFired = false
@@ -419,6 +466,13 @@ class DefaultGuardStateMachine(
                 state = GuardState.AWAITING_SELECTION
                 show(timeSelectionOverlay())
             }
+            config.mechanismEnabled(Mechanism.DELAYED_SELECTION) -> {
+                // 延迟选时：进入试探期（前台计时，期满弹时间选择浮层）
+                state = GuardState.TRIAL_RUNNING
+                trialRemainingMillis = config.time.delayedSelectionMinutes * 60_000L
+                trialPausedAtMillis = null
+                emptyList()
+            }
             config.dailyLimitMinutes > 0 -> {
                 state = GuardState.DIRECT_RUNNING
                 emptyList()
@@ -430,11 +484,24 @@ class DefaultGuardStateMachine(
         }
     }
 
-    /** 会话到时：用户仍停留应用内，显示"时间已到"浮层（冷却尚未开始）。 */
-    private fun enterTimeUp(effects: MutableCollection<GuardEffect>) {
-        state = GuardState.TIME_UP
-        currentOverlay = timeUpOverlay()
-        effects += GuardEffect.ShowOverlay(currentOverlay!!)
+    /**
+     * 会话到时：到期即进入冷却（v1.1，无独立确认浮层）。用户仍停留在应用内，
+     * 冷却浮层即刻显示并按墙钟推进；冷却基数按智能联动/固定值取。
+     */
+    private fun enterExpiryCooldown(effects: MutableCollection<GuardEffect>) {
+        enterCooldown(CooldownKind.EXPIRY, config.expiryCooldownMillisFor(usageElapsedMillis), effects, flushState = true)
+    }
+
+    /** 延时用尽：回到冷却——延时时被冻结的冷却剩余续接（无 pending 则进当刻满额到期冷却）。 */
+    private fun enterExtensionEndCooldown(effects: MutableCollection<GuardEffect>) {
+        val pendingKind = pendingCooldownKind
+        pendingCooldownKind = null
+        if (pendingKind != null) {
+            // 同一次冷却 Episode 的续接（非新开始），不再发 CooldownStarted 二次触发共享
+            enterCooldown(pendingKind, pendingCooldownRemainingMillis, effects, flushState = true, emitStarted = false)
+        } else {
+            enterCooldown(CooldownKind.EXPIRY, config.expiryCooldownMillisFor(usageElapsedMillis), effects, flushState = true)
+        }
     }
 
     /** 额度耗尽：立即中断，当日禁用（无延时）。 */
@@ -450,24 +517,33 @@ class DefaultGuardStateMachine(
         effects += GuardEffect.ShowOverlay(currentOverlay!!)
     }
 
-    /** 中途放弃：会话作废，进放弃冷却（机制关则 INACTIVE）。用户不在应用内，无浮层效果。 */
-    private fun abandonSession(effects: MutableCollection<GuardEffect>) {
+    /**
+     * 中途放弃：会话作废，进放弃冷却（机制关则按入口语义重入）。用户不在应用内，无浮层效果。
+     * [overshootMillis] = 宽限补偿的过冲时间，从冷却（含共享分发的折算基数）中扣除。
+     */
+    private fun abandonSession(overshootMillis: Long, effects: MutableCollection<GuardEffect>) {
+        // 智能联动以放弃时实际已用为基数，须在清零前计算
+        val cooldownMillis = (config.abandonCooldownMillisFor(usageElapsedMillis) - overshootMillis)
+            .coerceAtLeast(0L)
         sessionRemainingMillis = 0L
         usageElapsedMillis = 0L
         firedReminderMarks.clear()
         deferredUsageToasts.clear()
         pendingCooldownKind = null
-        enterCooldown(CooldownKind.ABANDON, config.time.abandonCooldownMillis, effects, goHome = false, hideOverlay = false, flushState = false)
+        enterCooldown(CooldownKind.ABANDON, cooldownMillis, effects, flushState = false)
     }
 
-    /** 进入指定冷却（机制关闭或剩余非正则回 INACTIVE）；效果顺序：GoHome → HideOverlay → FlushState。 */
+    /**
+     * 进入指定冷却（机制关闭或剩余非正则按入口语义重入）。
+     * 用户在应用内时即刻显示冷却浮层（到期路径）；否则等下次前台进入时显示。
+     * 携带 [GuardEffect.CooldownStarted] 供协调器做同组共享分发。
+     */
     private fun enterCooldown(
         kind: CooldownKind,
         remainingMillis: Long,
         effects: MutableCollection<GuardEffect>,
-        goHome: Boolean,
-        hideOverlay: Boolean,
         flushState: Boolean,
+        emitStarted: Boolean = true,
     ) {
         currentOverlay = null
         val mechanism = if (kind == CooldownKind.EXPIRY) Mechanism.EXPIRY_COOLDOWN else Mechanism.ABANDON_COOLDOWN
@@ -475,12 +551,21 @@ class DefaultGuardStateMachine(
             state = if (kind == CooldownKind.EXPIRY) GuardState.EXPIRY_COOLDOWN else GuardState.ABANDON_COOLDOWN
             cooldownKind = kind
             cooldownRemainingMillis = remainingMillis
+            cooldownShared = false
+            // 信息性效果，供协调器做同组共享分发；冷却 Episode 的续接（延时后）不重发
+            if (emitStarted) effects += GuardEffect.CooldownStarted(kind, remainingMillis)
+            if (inForeground) {
+                currentOverlay = cooldownOverlay()
+                effects += GuardEffect.ShowOverlay(currentOverlay!!)
+            }
         } else {
             state = GuardState.INACTIVE
             cooldownRemainingMillis = 0L
+            if (inForeground) {
+                effects += GuardEffect.HideOverlay
+                effects += enterFromInactive()
+            }
         }
-        if (goHome) effects += GuardEffect.GoHome
-        if (hideOverlay) effects += GuardEffect.HideOverlay
         if (flushState) effects += GuardEffect.FlushState
     }
 
@@ -550,12 +635,6 @@ class DefaultGuardStateMachine(
         quickProtectMillis = config.time.quickProtectMillis,
     )
 
-    private fun timeUpOverlay(): OverlaySpec = OverlaySpec.TimeUp(
-        confirmProtectMillis = config.time.confirmProtectMillis,
-        extensionAvailable = config.mechanismEnabled(Mechanism.EXTENSION) && !extensionUsed,
-        extensionProtectMillis = config.time.extensionProtectMillis,
-    )
-
     private fun quotaOverlay(): OverlaySpec = OverlaySpec.QuotaExhausted(
         usedLimitMinutes = config.dailyLimitMinutes,
         confirmProtectMillis = config.time.confirmProtectMillis,
@@ -563,8 +642,10 @@ class DefaultGuardStateMachine(
 
     private fun cooldownOverlay(): OverlaySpec = OverlaySpec.Cooldown(
         kind = cooldownKind,
-        extensionAvailable = config.mechanismEnabled(Mechanism.EXTENSION) && !extensionUsed,
+        extensionAvailable = !cooldownShared &&
+            config.mechanismEnabled(Mechanism.EXTENSION) && !extensionUsed,
         extensionProtectMillis = config.time.extensionProtectMillis,
+        shared = cooldownShared,
     )
 
     private fun todayRemainingMinutes(): Int? =
@@ -577,6 +658,7 @@ class DefaultGuardStateMachine(
             GuardState.RUNNING -> sessionRemainingMillis
             GuardState.GRACE -> graceRemainingMillis
             GuardState.EXTENSION_RUNNING -> extensionRemainingMillis
+            GuardState.TRIAL_RUNNING -> trialRemainingMillis
             GuardState.EXPIRY_COOLDOWN, GuardState.ABANDON_COOLDOWN -> cooldownRemainingMillis
             else -> null
         }
@@ -598,15 +680,22 @@ class DefaultGuardStateMachine(
         }
         extensionUsed = data.extensionUsed
         when (data.kind) {
-            // RUNNING 重启等同退后台：会话剩余保持，宽限期从头计
+            // RUNNING 重启等同退后台：会话剩余保持，宽限期从头计（智能联动按所选时长）
             GuardState.RUNNING -> {
                 sessionRemainingMillis = (data.remainingMillis ?: 0L).coerceAtLeast(0L)
+                sessionSelectedMillis = (data.sessionSelectedMillis ?: 0L).coerceAtLeast(0L)
                 state = GuardState.GRACE
-                graceRemainingMillis = config.time.gracePeriodMillis
+                graceRemainingMillis = config.gracePeriodMillisFor(sessionSelectedMillis)
             }
             GuardState.GRACE -> {
+                sessionSelectedMillis = (data.sessionSelectedMillis ?: 0L).coerceAtLeast(0L)
                 state = GuardState.GRACE
                 graceRemainingMillis = (data.remainingMillis ?: 0L).coerceAtLeast(0L)
+            }
+            GuardState.TRIAL_RUNNING -> {
+                state = GuardState.TRIAL_RUNNING
+                trialRemainingMillis = (data.remainingMillis ?: 0L).coerceAtLeast(0L)
+                trialPausedAtMillis = data.trialPausedAtMillis
             }
             GuardState.EXTENSION_RUNNING -> {
                 state = GuardState.EXTENSION_RUNNING
@@ -615,11 +704,16 @@ class DefaultGuardStateMachine(
                 pendingCooldownKind = data.pendingCooldownKind
                 pendingCooldownRemainingMillis = data.pendingCooldownRemainingMillis ?: 0L
             }
+            // 旧版本落盘的 TIME_UP（到期停留）：按"确定离开"语义续接满额到期冷却
             GuardState.TIME_UP -> {
-                state = GuardState.TIME_UP
-                extensionUsed = data.extensionUsed
-                pendingCooldownKind = data.pendingCooldownKind
-                pendingCooldownRemainingMillis = data.pendingCooldownRemainingMillis ?: 0L
+                if (config.mechanismEnabled(Mechanism.EXPIRY_COOLDOWN) && config.time.expiryCooldownMillis > 0L) {
+                    state = GuardState.EXPIRY_COOLDOWN
+                    cooldownKind = CooldownKind.EXPIRY
+                    cooldownRemainingMillis = config.time.expiryCooldownMillis
+                    cooldownShared = false
+                } else {
+                    state = GuardState.INACTIVE
+                }
             }
             GuardState.EXPIRY_COOLDOWN, GuardState.ABANDON_COOLDOWN -> {
                 val kind = if (data.kind == GuardState.EXPIRY_COOLDOWN) CooldownKind.EXPIRY else CooldownKind.ABANDON
@@ -643,15 +737,23 @@ class DefaultGuardStateMachine(
             kind = GuardState.RUNNING,
             remainingMillis = sessionRemainingMillis,
             extensionUsed = extensionUsed,
+            sessionSelectedMillis = sessionSelectedMillis,
         )
         GuardState.GRACE -> GuardStateData(
             kind = GuardState.GRACE,
             remainingMillis = graceRemainingMillis,
             extensionUsed = extensionUsed,
+            sessionSelectedMillis = sessionSelectedMillis,
         )
-        GuardState.EXTENSION_RUNNING, GuardState.TIME_UP -> GuardStateData(
+        GuardState.TRIAL_RUNNING -> GuardStateData(
+            kind = GuardState.TRIAL_RUNNING,
+            remainingMillis = trialRemainingMillis,
+            extensionUsed = extensionUsed,
+            trialPausedAtMillis = trialPausedAtMillis,
+        )
+        GuardState.EXTENSION_RUNNING -> GuardStateData(
             kind = state,
-            remainingMillis = if (state == GuardState.EXTENSION_RUNNING) extensionRemainingMillis else null,
+            remainingMillis = extensionRemainingMillis,
             extensionUsed = extensionUsed,
             pendingCooldownKind = pendingCooldownKind,
             pendingCooldownRemainingMillis = pendingCooldownKind?.let { pendingCooldownRemainingMillis },
@@ -666,20 +768,30 @@ class DefaultGuardStateMachine(
 
     /**
      * 调试注入（仅调试工具调用，正常事件流不走此路径）：强制切换到 [state]，
-     * [remainingMillis] 作为该状态的活动剩余（宽限/冷却/会话/延时；状态无倒计时时忽略）。
+     * [remainingMillis] 作为该状态的活动剩余（宽限/冷却/会话/延时/试探；状态无倒计时时忽略）。
      */
     override fun debugInject(state: GuardState, remainingMillis: Long?) {
         lastProcessedMillis = clock.nowMillis()
         when (state) {
             GuardState.INACTIVE -> {
-                toInactive()
+                this.state = GuardState.INACTIVE
+                cooldownRemainingMillis = 0L
+                cooldownShared = false
+                currentOverlay = null
                 inForeground = false
             }
             GuardState.RUNNING -> {
                 this.state = GuardState.RUNNING
                 sessionRemainingMillis = (remainingMillis ?: 0L).coerceAtLeast(0L)
+                sessionSelectedMillis = sessionRemainingMillis
                 firedReminderMarks.clear()
                 deferredUsageToasts.clear()
+            }
+            GuardState.TRIAL_RUNNING -> {
+                this.state = GuardState.TRIAL_RUNNING
+                trialRemainingMillis = remainingMillis?.coerceAtLeast(0L)
+                    ?: config.time.delayedSelectionMinutes * 60_000L
+                trialPausedAtMillis = null
             }
             GuardState.GRACE -> {
                 this.state = GuardState.GRACE
@@ -696,10 +808,7 @@ class DefaultGuardStateMachine(
                 this.state = state
                 cooldownKind = if (state == GuardState.EXPIRY_COOLDOWN) CooldownKind.EXPIRY else CooldownKind.ABANDON
                 cooldownRemainingMillis = (remainingMillis ?: 0L).coerceAtLeast(0L)
-            }
-            GuardState.TIME_UP -> {
-                this.state = GuardState.TIME_UP
-                currentOverlay = timeUpOverlay()
+                cooldownShared = false
             }
             GuardState.AWAITING_SELECTION -> {
                 this.state = GuardState.AWAITING_SELECTION
@@ -710,15 +819,37 @@ class DefaultGuardStateMachine(
         publishSnapshot()
     }
 
-    override fun onConfigUpdated(newConfig: GroupConfig) {        config = newConfig
+    override fun applySharedCooldown(kind: CooldownKind, durationMillis: Long) {
+        // 仅闲置/待选择接收：不打断进行中的会话、宽限、延时或已有冷却
+        if (state != GuardState.INACTIVE && state != GuardState.AWAITING_SELECTION) return
+        if (durationMillis <= 0L) return
+        lastProcessedMillis = clock.nowMillis()
+        state = if (kind == CooldownKind.EXPIRY) GuardState.EXPIRY_COOLDOWN else GuardState.ABANDON_COOLDOWN
+        cooldownKind = kind
+        cooldownRemainingMillis = durationMillis
+        cooldownShared = true
+        if (inForeground) {
+            currentOverlay = cooldownOverlay()
+        } else {
+            currentOverlay = null
+        }
+        publishSnapshot()
+    }
+
+    override fun onConfigUpdated(newConfig: GroupConfig) {
+        config = newConfig
         if (newConfig.isForbiddenByQuota()) {
             if (state != GuardState.BLACKLISTED) {
                 // 分组语义切换为平禁（每日限额 = -1）：黑名单无会话/冷却语义，全部作废
                 state = GuardState.BLACKLISTED
                 sessionRemainingMillis = 0L
+                sessionSelectedMillis = 0L
                 graceRemainingMillis = 0L
                 extensionRemainingMillis = 0L
+                trialRemainingMillis = 0L
+                trialPausedAtMillis = null
                 cooldownRemainingMillis = 0L
+                cooldownShared = false
                 pendingCooldownKind = null
                 usageElapsedMillis = 0L
                 firedReminderMarks.clear()
@@ -732,13 +863,14 @@ class DefaultGuardStateMachine(
                     state = GuardState.INACTIVE
                     currentOverlay = null
                 }
-                state == GuardState.RUNNING || state == GuardState.EXTENSION_RUNNING || state == GuardState.DIRECT_RUNNING -> {
+                state == GuardState.RUNNING || state == GuardState.EXTENSION_RUNNING || state == GuardState.DIRECT_RUNNING || state == GuardState.TRIAL_RUNNING -> {
                     val quota = newConfig.remainingQuotaMillis(usedTodayMillis)
                     if (quota != null && quota <= 0L) {
                         // 热更新使当日额度立即超限：前台消耗态即刻中断
                         state = GuardState.QUOTA_EXHAUSTED
                         sessionRemainingMillis = 0L
                         extensionRemainingMillis = 0L
+                        trialRemainingMillis = 0L
                         pendingCooldownKind = null
                         currentOverlay = if (inForeground) quotaOverlay() else null
                     }
@@ -749,7 +881,6 @@ class DefaultGuardStateMachine(
         if (currentOverlay != null) {
             currentOverlay = when (state) {
                 GuardState.AWAITING_SELECTION -> timeSelectionOverlay()
-                GuardState.TIME_UP -> timeUpOverlay()
                 GuardState.QUOTA_EXHAUSTED -> quotaOverlay()
                 GuardState.EXPIRY_COOLDOWN, GuardState.ABANDON_COOLDOWN -> cooldownOverlay()
                 else -> currentOverlay

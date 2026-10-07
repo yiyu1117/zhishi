@@ -41,7 +41,7 @@ class GraceAndAbandonCooldownTest {
 
         val effects = tickAfter(machine, clock, 120_000L) // 恰好耗尽
 
-        assertEquals(emptyList(), effects)
+        assertEquals(listOf(GuardEffect.CooldownStarted(CooldownKind.ABANDON, 300_000L)), effects)
         val snapshot = machine.snapshot.value
         assertEquals(GuardState.ABANDON_COOLDOWN, snapshot.state)
         assertEquals(300_000L, snapshot.remainingMillis) // 默认放弃冷却 5 分钟
@@ -65,9 +65,9 @@ class GraceAndAbandonCooldownTest {
         assertEquals(CooldownKind.ABANDON, cooldown.kind)
     }
 
-    /** 停留冷却浮层期间倒计时冻结。 */
+    /** 停留冷却浮层期间倒计时照常推进（v1.1 墙钟规则），走完原地回时间选择。 */
     @Test
-    fun `停留冷却浮层期间倒计时冻结`() {
+    fun `停留冷却浮层倒计时照常推进`() {
         val clock = FakeClock()
         val machine = newMachine(testConfig(Mechanism.TIME_SELECTION, Mechanism.ABANDON_COOLDOWN), clock)
         startSession(machine, 10)
@@ -79,7 +79,7 @@ class GraceAndAbandonCooldownTest {
 
         assertEquals(emptyList(), effects)
         assertEquals(GuardState.ABANDON_COOLDOWN, machine.snapshot.value.state)
-        assertEquals(300_000L, machine.snapshot.value.remainingMillis) // 冻结未走
+        assertEquals(240_000L, machine.snapshot.value.remainingMillis) // 墙钟照走
         assertIs<OverlaySpec.Cooldown>(machine.snapshot.value.overlay)
     }
 

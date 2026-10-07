@@ -253,6 +253,9 @@ internal fun GroupDetailScreen(groupId: String, onBack: () -> Unit, onPickApps: 
     }
 
     var showDeleteDialog by remember { mutableStateOf(false) }
+    // 分组改名（仅自定义组；内置组名称为固定展示文案）
+    var showRenameDialog by remember { mutableStateOf(false) }
+    var newGroupName by remember { mutableStateOf("") }
     // 保护提醒：待确认开启的机制（确认才写入，取消则开关回弹）
     var pendingMechanism by remember { mutableStateOf<Mechanism?>(null) }
     val lock = rememberDisciplineLockUi()
@@ -265,6 +268,17 @@ internal fun GroupDetailScreen(groupId: String, onBack: () -> Unit, onPickApps: 
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Text("‹", fontSize = 28.sp)
+                    }
+                },
+                actions = {
+                    if (!group.isBuiltIn) {
+                        TextButton(
+                            enabled = !lock.locked,
+                            onClick = {
+                                newGroupName = group.name
+                                showRenameDialog = true
+                            },
+                        ) { Text("改名") }
                     }
                 },
             )
@@ -292,10 +306,10 @@ internal fun GroupDetailScreen(groupId: String, onBack: () -> Unit, onPickApps: 
                     body = "白名单组：组内应用完全不受任何管控，机制开关不适用且不可编辑。",
                 )
                 else -> {
-                    Text("六项机制", style = MaterialTheme.typography.titleMedium)
+                    Text("七项机制", style = MaterialTheme.typography.titleMedium)
                     Spacer(Modifier.height(4.dp))
                     Text(
-                        "机制开关与下方参数保存后立即生效。",
+                        "机制开关与下方参数保存后立即生效；「开屏时间选择」与「延迟选时」互斥，开一个自动关另一个。",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -315,20 +329,13 @@ internal fun GroupDetailScreen(groupId: String, onBack: () -> Unit, onPickApps: 
                                 enabled = !lock.locked,
                                 onCheckedChange = { on ->
                                     if (lock.locked) return@Switch
-                                    if (on) {
-                                        // 保护提醒：影响范围大（兜底所有未分组应用）的默认组才需确认；
-                                        // 自定义组开关直接生效
-                                        if (group.kind == GroupKind.DEFAULT) {
-                                            pendingMechanism = mechanism
-                                        } else {
-                                            scope.launch {
-                                                val next = group.config.mechanisms + mechanism
-                                                repo.updateConfig(group.id, group.config.copy(mechanisms = next))
-                                            }
-                                        }
+                                    // 默认组覆盖面大（兜底所有未分组应用），开启前确认；
+                                    // 关闭与自定义组开关直接生效
+                                    if (on && group.kind == GroupKind.DEFAULT) {
+                                        pendingMechanism = mechanism
                                     } else {
                                         scope.launch {
-                                            val next = group.config.mechanisms - mechanism
+                                            val next = mechanismsAfter(group.config.mechanisms, mechanism, on)
                                             repo.updateConfig(group.id, group.config.copy(mechanisms = next))
                                         }
                                     }
@@ -415,6 +422,34 @@ internal fun GroupDetailScreen(groupId: String, onBack: () -> Unit, onPickApps: 
         }
     }
 
+    if (showRenameDialog) {
+        AlertDialog(
+            onDismissRequest = { showRenameDialog = false },
+            title = { Text("重命名分组") },
+            text = {
+                OutlinedTextField(
+                    value = newGroupName,
+                    onValueChange = { newGroupName = it },
+                    label = { Text("分组名称") },
+                    singleLine = true,
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = newGroupName.isNotBlank() && !lock.locked,
+                    onClick = {
+                        val name = newGroupName.trim()
+                        showRenameDialog = false
+                        if (name.isNotEmpty() && name != group.name) {
+                            scope.launch { repo.renameGroup(group.id, name) }
+                        }
+                    },
+                ) { Text("确定") }
+            },
+            dismissButton = { TextButton(onClick = { showRenameDialog = false }) { Text("取消") } },
+        )
+    }
+
     if (showDeleteDialog) {
         AlertDialog(
             onDismissRequest = { showDeleteDialog = false },
@@ -458,9 +493,10 @@ internal fun GroupDetailScreen(groupId: String, onBack: () -> Unit, onPickApps: 
                 TextButton(onClick = {
                     pendingMechanism = null
                     scope.launch {
+                        val next = mechanismsAfter(group.config.mechanisms, mechanism, enabled = true)
                         repo.updateConfig(
                             group.id,
-                            group.config.copy(mechanisms = group.config.mechanisms + mechanism),
+                            group.config.copy(mechanisms = next),
                         )
                     }
                 }) { Text("确认开启") }
@@ -490,7 +526,19 @@ private fun mechanismLabel(mechanism: Mechanism): String = when (mechanism) {
     Mechanism.EXTENSION -> "延时使用"
     Mechanism.EXPIRY_COOLDOWN -> "到期冷却"
     Mechanism.ABANDON_COOLDOWN -> "放弃冷却"
+    Mechanism.DELAYED_SELECTION -> "延迟选时"
 }
+
+/** 机制写入（含互斥联动）：延迟选时与开屏时间选择互斥，开一个自动关另一个。 */
+private fun mechanismsAfter(current: Set<Mechanism>, target: Mechanism, enabled: Boolean): Set<Mechanism> =
+    if (enabled) {
+        val next = current + target
+        if (target == Mechanism.TIME_SELECTION) next - Mechanism.DELAYED_SELECTION
+        else if (target == Mechanism.DELAYED_SELECTION) next - Mechanism.TIME_SELECTION
+        else next
+    } else {
+        current - target
+    }
 
 /** 成员解析：分组内分配的应用 + 默认组兜底的未分配用户应用；目录缺失时以包名显示。 */
 private fun membersOf(

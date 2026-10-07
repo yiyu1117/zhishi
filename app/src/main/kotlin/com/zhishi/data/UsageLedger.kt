@@ -28,6 +28,8 @@ import kotlinx.coroutines.withContext
  * - `extension_used`          ↔ [GuardStateData.extensionUsed]（0/1）；
  * - `pending_kind` / `pending_remaining_millis` ↔ [GuardStateData.pendingCooldownKind] / [GuardStateData.pendingCooldownRemainingMillis]
  *   （可空：延时发起前被冻结的冷却，恢复后按剩余续接而非重置满额）；
+ * - `session_selected_millis` ↔ [GuardStateData.sessionSelectedMillis]（可空：智能宽限期的计算基数）；
+ * - `trial_paused_at_millis` ↔ [GuardStateData.trialPausedAtMillis]（可空：试探期退后台暂停时刻）；
  * - `updated_at`              ↔ 写入时刻 [System.currentTimeMillis]（跨日失效判定 + 诊断，不参与恢复）。
  *
  * ### 恢复语义（architecture.md「恢复语义」，由协调器重建状态机时执行，本层原样存取）
@@ -63,6 +65,11 @@ class UsageLedger(context: Context) : SQLiteOpenHelper(
         if (oldVersion < 2) {
             db.execSQL("ALTER TABLE guard_state ADD COLUMN pending_kind TEXT")
             db.execSQL("ALTER TABLE guard_state ADD COLUMN pending_remaining_millis INTEGER")
+        }
+        // v3：guard_state 增加 v1.1 智能宽限期基数（所选时长）与试探期中断保留时刻两列
+        if (oldVersion < 3) {
+            db.execSQL("ALTER TABLE guard_state ADD COLUMN session_selected_millis INTEGER")
+            db.execSQL("ALTER TABLE guard_state ADD COLUMN trial_paused_at_millis INTEGER")
         }
     }
 
@@ -145,6 +152,8 @@ class UsageLedger(context: Context) : SQLiteOpenHelper(
                     put(COL_EXTENSION_USED, if (data.extensionUsed) 1 else 0)
                     put(COL_PENDING_KIND, data.pendingCooldownKind?.name)
                     put(COL_PENDING_REMAINING, data.pendingCooldownRemainingMillis)
+                    put(COL_SESSION_SELECTED, data.sessionSelectedMillis)
+                    put(COL_TRIAL_PAUSED_AT, data.trialPausedAtMillis)
                     put(COL_UPDATED_AT, System.currentTimeMillis())
                 },
                 SQLiteDatabase.CONFLICT_REPLACE,
@@ -155,8 +164,8 @@ class UsageLedger(context: Context) : SQLiteOpenHelper(
     /** 读取某应用的恢复数据；无记录或 kind 无法识别返回 null。 */
     suspend fun loadGuardState(packageName: String): GuardStateData? = withContext(Dispatchers.IO) {
         readableDatabase.rawQuery(
-            "SELECT kind, remaining_millis, cooldown_deadline_millis, extension_used, pending_kind, pending_remaining_millis " +
-                "FROM guard_state WHERE package = ? LIMIT 1",
+            "SELECT kind, remaining_millis, cooldown_deadline_millis, extension_used, pending_kind, pending_remaining_millis, " +
+                "session_selected_millis, trial_paused_at_millis FROM guard_state WHERE package = ? LIMIT 1",
             arrayOf(packageName),
         ).use { cursor ->
             if (cursor.moveToFirst()) cursor.toGuardStateData() else null
@@ -167,7 +176,8 @@ class UsageLedger(context: Context) : SQLiteOpenHelper(
     suspend fun loadAllGuardStates(): Map<String, GuardStateRecord> = withContext(Dispatchers.IO) {
         val result = LinkedHashMap<String, GuardStateRecord>()
         readableDatabase.rawQuery(
-            "SELECT package, kind, remaining_millis, cooldown_deadline_millis, extension_used, pending_kind, pending_remaining_millis, updated_at FROM guard_state",
+            "SELECT package, kind, remaining_millis, cooldown_deadline_millis, extension_used, pending_kind, pending_remaining_millis, " +
+                "session_selected_millis, trial_paused_at_millis, updated_at FROM guard_state",
             null,
         ).use { cursor ->
             while (cursor.moveToNext()) {
@@ -206,6 +216,8 @@ class UsageLedger(context: Context) : SQLiteOpenHelper(
         val pendingKind = if (isNull(pendingKindCol)) null else runCatching {
             com.zhishi.core.model.CooldownKind.valueOf(getString(pendingKindCol))
         }.getOrNull()
+        val sessionSelectedCol = getColumnIndexOrThrow(COL_SESSION_SELECTED)
+        val trialPausedCol = getColumnIndexOrThrow(COL_TRIAL_PAUSED_AT)
         return GuardStateData(
             kind = state,
             remainingMillis = if (isNull(remainingCol)) null else getLong(remainingCol),
@@ -213,12 +225,14 @@ class UsageLedger(context: Context) : SQLiteOpenHelper(
             extensionUsed = getInt(extensionCol) != 0,
             pendingCooldownKind = pendingKind,
             pendingCooldownRemainingMillis = if (isNull(pendingRemainingCol)) null else getLong(pendingRemainingCol),
+            sessionSelectedMillis = if (isNull(sessionSelectedCol)) null else getLong(sessionSelectedCol),
+            trialPausedAtMillis = if (isNull(trialPausedCol)) null else getLong(trialPausedCol),
         )
     }
 
     companion object {
         private const val DB_NAME = "guard.db"
-        private const val DB_VERSION = 2
+        private const val DB_VERSION = 3
 
         private const val TABLE_USAGE_DAY = "usage_day"
         private const val TABLE_GUARD_STATE = "guard_state"
@@ -231,6 +245,8 @@ class UsageLedger(context: Context) : SQLiteOpenHelper(
         private const val COL_EXTENSION_USED = "extension_used"
         private const val COL_PENDING_KIND = "pending_kind"
         private const val COL_PENDING_REMAINING = "pending_remaining_millis"
+        private const val COL_SESSION_SELECTED = "session_selected_millis"
+        private const val COL_TRIAL_PAUSED_AT = "trial_paused_at_millis"
         private const val COL_UPDATED_AT = "updated_at"
 
         private const val SQL_CREATE_USAGE_DAY =
@@ -249,6 +265,8 @@ class UsageLedger(context: Context) : SQLiteOpenHelper(
                 "extension_used INTEGER NOT NULL DEFAULT 0, " +
                 "pending_kind TEXT, " +
                 "pending_remaining_millis INTEGER, " +
+                "session_selected_millis INTEGER, " +
+                "trial_paused_at_millis INTEGER, " +
                 "updated_at INTEGER NOT NULL)"
 
         private const val SQL_INDEX_USAGE_DAY =

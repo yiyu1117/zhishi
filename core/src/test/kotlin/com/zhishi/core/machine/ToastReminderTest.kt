@@ -35,10 +35,10 @@ class ToastReminderTest {
         assertEquals(emptyList(), toasts(tickAfter(machine, clock, 2 * 60_000L))) // 剩 3
         assertEquals(listOf(ToastEvent.TimeRemaining(2)), toasts(tickAfter(machine, clock, 60_000L))) // 剩 2
         assertEquals(listOf(ToastEvent.TimeRemaining(1)), toasts(tickAfter(machine, clock, 60_000L))) // 剩 1
-        // 最后一分钟走完 → 到时浮层，无更多刻度
+        // 最后一分钟走完 → 到期原地回时间选择（无冷却机制），无更多刻度
         val expiry = tickAfter(machine, clock, 60_000L)
-        assertEquals(1, expiry.size)
-        assertIs<GuardEffect.ShowOverlay>(expiry.single())
+        assertEquals(1, overlaySpecs(expiry).size)
+        assertIs<OverlaySpec.TimeSelection>(overlaySpecs(expiry).single())
     }
 
     /** 撞点时只弹一条：剩余提醒优先；且此后本会话的周期提示全部抑制。 */
@@ -90,10 +90,10 @@ class ToastReminderTest {
 
         assertEquals(emptyList(), toasts(tickAfter(machine, clock, 6 * 60_000L))) // 剩 4 分钟，未触发
         assertEquals(listOf(ToastEvent.TimeRemaining(3)), toasts(tickAfter(machine, clock, 60_000L))) // 剩 3
-        // 到时不再有其他刻度
+        // 到时不再有其他刻度（到期原地回时间选择）
         val expiry = tickAfter(machine, clock, 3 * 60_000L)
-        assertEquals(1, expiry.size)
-        assertIs<GuardEffect.ShowOverlay>(expiry.single())
+        assertEquals(1, overlaySpecs(expiry).size)
+        assertIs<OverlaySpec.TimeSelection>(overlaySpecs(expiry).single())
     }
 
     /** 会话开始时已经过的刻度不补发（选 3 分钟：5 分钟刻度永不触发）。 */
@@ -106,8 +106,8 @@ class ToastReminderTest {
         assertEquals(listOf(ToastEvent.TimeRemaining(2)), toasts(tickAfter(machine, clock, 60_000L)))
         assertEquals(listOf(ToastEvent.TimeRemaining(1)), toasts(tickAfter(machine, clock, 60_000L)))
         val expiry = tickAfter(machine, clock, 60_000L)
-        assertEquals(1, expiry.size)
-        assertIs<GuardEffect.ShowOverlay>(expiry.single())
+        assertEquals(1, overlaySpecs(expiry).size)
+        assertIs<OverlaySpec.TimeSelection>(overlaySpecs(expiry).single())
     }
 
     /** 额度先尽时，刻度按额度耗尽点计算（选 30 分钟、限额 7 分钟）。 */
@@ -160,13 +160,13 @@ class ToastReminderTest {
             clock,
         )
         startSession(machine, 2)
-        tickAfter(machine, clock, 120_000L) // → TIME_UP
+        tickAfter(machine, clock, 120_000L) // → 到期即冷却
         machine.dispatch(GuardEvent.ExtensionRequested)
 
         assertEquals(listOf(ToastEvent.UsagePeriod(3)), toasts(tickAfter(machine, clock, 60_000L))) // 会话累计 3 分钟
         val expiry = tickAfter(machine, clock, 60_000L)
-        assertEquals(1, expiry.size)
-        assertIs<GuardEffect.ShowOverlay>(expiry.single()) // 只有浮层效果，无 Toast
+        assertEquals(1, overlaySpecs(expiry).size)
+        assertIs<OverlaySpec.Cooldown>(overlaySpecs(expiry).single()) // 延时走完回冷却浮层，无 Toast
     }
 
     /** 两个 Toast 机制全关时对应提醒不弹。 */
@@ -177,8 +177,8 @@ class ToastReminderTest {
         startSession(machine, 10)
 
         val effects = tickAfter(machine, clock, 10 * 60_000L)
-        assertEquals(1, effects.size) // 只有 TIME_UP 浮层
-        assertIs<GuardEffect.ShowOverlay>(effects.single())
+        assertEquals(emptyList(), toasts(effects))
+        assertEquals(1, overlaySpecs(effects).size) // 只有到期重入的时间选择浮层
     }
 
     /** 单步时间跳跃跨多个周期边界：按时间先后依次补发。 */

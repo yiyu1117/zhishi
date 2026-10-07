@@ -53,6 +53,8 @@ import kotlin.math.ceil
 
 /** 调试悬浮窗的单机条目：状态机实时状态与活动倒计时。 */
 data class MachineDebugEntry(
+    /** 包名：调试注入按包名定位状态机（应用名仅展示用）。 */
+    val packageName: String,
     val appName: String,
     val state: GuardState,
     /** 活动倒计时剩余（会话/宽限/延时/冷却，随状态语义）；null = 无。 */
@@ -259,15 +261,16 @@ fun DebugToolsPanel(
                 Spacer(Modifier.height(6.dp))
                 Text("${entry.appName} · ${stateLabel(entry.state)}", fontSize = 11.sp, color = DebugOnDim)
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    InjectChip("会话5分") { onInject(entry.appName, GuardState.RUNNING, 5 * 60_000L) }
-                    InjectChip("会话1分") { onInject(entry.appName, GuardState.RUNNING, 60_000L) }
-                    InjectChip("延时1分") { onInject(entry.appName, GuardState.EXTENSION_RUNNING, 60_000L) }
-                    InjectChip("宽限30秒") { onInject(entry.appName, GuardState.GRACE, 30_000L) }
-                    InjectChip("到期冷却5分") { onInject(entry.appName, GuardState.EXPIRY_COOLDOWN, 5 * 60_000L) }
-                    InjectChip("放弃冷却5分") { onInject(entry.appName, GuardState.ABANDON_COOLDOWN, 5 * 60_000L) }
-                    InjectChip("时间已到") { onInject(entry.appName, GuardState.TIME_UP, null) }
-                    InjectChip("待选择") { onInject(entry.appName, GuardState.AWAITING_SELECTION, null) }
-                    InjectChip("清除") { onInject(entry.appName, GuardState.INACTIVE, null) }
+                    // 按包名注入（协调器以包名定位状态机；应用名仅用于展示）
+                    InjectChip("会话5分") { onInject(entry.packageName, GuardState.RUNNING, 5 * 60_000L) }
+                    InjectChip("会话1分") { onInject(entry.packageName, GuardState.RUNNING, 60_000L) }
+                    InjectChip("延时1分") { onInject(entry.packageName, GuardState.EXTENSION_RUNNING, 60_000L) }
+                    InjectChip("宽限30秒") { onInject(entry.packageName, GuardState.GRACE, 30_000L) }
+                    InjectChip("到期冷却5分") { onInject(entry.packageName, GuardState.EXPIRY_COOLDOWN, 5 * 60_000L) }
+                    InjectChip("放弃冷却5分") { onInject(entry.packageName, GuardState.ABANDON_COOLDOWN, 5 * 60_000L) }
+                    InjectChip("试探中") { onInject(entry.packageName, GuardState.TRIAL_RUNNING, null) }
+                    InjectChip("待选择") { onInject(entry.packageName, GuardState.AWAITING_SELECTION, null) }
+                    InjectChip("清除") { onInject(entry.packageName, GuardState.INACTIVE, null) }
                 }
             }
 
@@ -334,13 +337,14 @@ fun stateLabel(state: GuardState): String = when (state) {
     GuardState.AWAITING_SELECTION -> "待选择"
     GuardState.RUNNING -> "会话中"
     GuardState.GRACE -> "宽限期"
-    GuardState.TIME_UP -> "时间已到"
+    GuardState.TIME_UP -> "时间已到（旧）"
     GuardState.EXTENSION_RUNNING -> "延时中"
     GuardState.EXPIRY_COOLDOWN -> "到期冷却"
     GuardState.ABANDON_COOLDOWN -> "放弃冷却"
     GuardState.QUOTA_EXHAUSTED -> "额度用尽"
     GuardState.BLACKLISTED -> "禁止使用"
     GuardState.DIRECT_RUNNING -> "直接计时"
+    GuardState.TRIAL_RUNNING -> "试探中"
 }
 
 private fun remainingSuffix(millis: Long?): String {

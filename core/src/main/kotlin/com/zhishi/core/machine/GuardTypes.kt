@@ -18,7 +18,7 @@ enum class GuardState {
     /** 宽限期：退后台/息屏，会话计时暂停，宽限倒计时推进。 */
     GRACE,
 
-    /** 时间已到：用户仍停留在应用内，显示"时间已到"浮层。 */
+    /** 时间已到（v1.0 遗留：到期已改为直接进冷却，本状态仅在旧版持久化数据中出现）。 */
     TIME_UP,
 
     /** 延时使用中：前台计时，冷却冻结。 */
@@ -38,9 +38,17 @@ enum class GuardState {
 
     /** 直接使用：无时间选择机制但有每日限额的分组，前台直接计时并记账。 */
     DIRECT_RUNNING,
+
+    /** 试探中：延迟选时分组的免费试用期，前台计时，期满弹时间选择浮层。 */
+    TRIAL_RUNNING,
 }
 
-/** 送入守护状态机的事件。 */
+/**
+ * 送入守护状态机的事件。
+ *
+ * 注：会话到期不再有独立确认步骤——到期即进入冷却（冷却浮层承担"时间已到"提示与
+ * 返回桌面/延时按钮），[ConfirmExit] 仅用于冷却浮层、时间选择浮层与额度浮层的退出。
+ */
 sealed interface GuardEvent {
     /** 检测到应用进入前台。 */
     data object ForegroundEntered : GuardEvent
@@ -75,13 +83,6 @@ sealed interface OverlaySpec {
         val quickProtectMillis: Long,
     ) : OverlaySpec
 
-    /** "时间已到"浮层。 */
-    data class TimeUp(
-        val confirmProtectMillis: Long,
-        val extensionAvailable: Boolean,
-        val extensionProtectMillis: Long,
-    ) : OverlaySpec
-
     /** "今日 N 分钟已用完，零点重置"浮层：无延时。 */
     data class QuotaExhausted(
         val usedLimitMinutes: Int,
@@ -91,11 +92,16 @@ sealed interface OverlaySpec {
     /** 禁止使用浮层（黑名单），无任何按钮。 */
     data object Forbidden : OverlaySpec
 
-    /** 冷却倒计时浮层："X 分钟后可打开"。 */
+    /**
+     * 冷却倒计时浮层："X 分钟后可打开"。
+     * 会话到期不再有独立确认浮层——到期即进入本浮层，副标题兼作"时间已到"提示；
+     * [shared] = 同组共享冷却（接收方未使用过，不提供延时按钮）。
+     */
     data class Cooldown(
         val kind: CooldownKind,
         val extensionAvailable: Boolean,
         val extensionProtectMillis: Long,
+        val shared: Boolean = false,
     ) : OverlaySpec
 }
 
@@ -127,6 +133,12 @@ sealed interface GuardEffect {
 
     /** 请求持久化当前状态与记账（重启恢复用）。 */
     data object FlushState : GuardEffect
+
+    /**
+     * 本机自有冷却开始（信息性效果，协调器据此实现同组共享冷却的分发）。
+     * 共享冷却的注入（[GuardStateMachine.applySharedCooldown]）不产生本效果，避免链式传染。
+     */
+    data class CooldownStarted(val kind: CooldownKind, val durationMillis: Long) : GuardEffect
 }
 
 /** 状态快照：UI/协调器观测用，随每次迁移与 Tick 更新。 */
@@ -146,7 +158,7 @@ data class GuardSnapshot(
 /** 持久化恢复数据：重启后重建状态机。 */
 data class GuardStateData(
     val kind: GuardState,
-    /** 会话/宽限/延时的剩余（毫秒）。 */
+    /** 会话/宽限/延时/试探期的剩余（毫秒）。 */
     val remainingMillis: Long? = null,
     /** 冷却绝对截止时刻（epoch millis，按离开时刻起算，停机时间计入）。 */
     val cooldownDeadlineMillis: Long? = null,
@@ -158,6 +170,10 @@ data class GuardStateData(
      */
     val pendingCooldownKind: CooldownKind? = null,
     val pendingCooldownRemainingMillis: Long? = null,
+    /** 本会话开屏所选时长（毫秒）：智能宽限期按比例计算的基数，重启恢复用。 */
+    val sessionSelectedMillis: Long? = null,
+    /** 试探期退后台的暂停时刻（epoch millis）：恢复后据此判中断保留（超时清零/保留续计）。 */
+    val trialPausedAtMillis: Long? = null,
 ) {
     companion object {
         val EMPTY = GuardStateData(GuardState.INACTIVE)
@@ -187,4 +203,11 @@ abstract class GuardStateMachine(
      * [remainingMillis] 作为该状态的活动剩余（状态无倒计时时忽略）。
      */
     abstract fun debugInject(state: GuardState, remainingMillis: Long?)
+
+    /**
+     * 注入同组共享冷却（由协调器在组内其它应用的冷却开始时分发，正常事件流不走此路径）：
+     * 仅当本机处于闲置或待选择时生效（不打断进行中的会话/宽限/冷却）；
+     * 接收方未使用过，冷却浮层不提供延时按钮。
+     */
+    abstract fun applySharedCooldown(kind: CooldownKind, durationMillis: Long)
 }

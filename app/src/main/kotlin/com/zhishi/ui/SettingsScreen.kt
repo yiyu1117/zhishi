@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
@@ -217,12 +218,7 @@ internal fun SettingsScreen(onBack: () -> Unit) {
 
                 SectionSubHeader("快选档位（拦截浮层的 6 个时长按钮）")
                 tp.quickOptionsMinutes.forEachIndexed { index, minutes ->
-                    SettingRow(
-                        "快选档位 ${index + 1}",
-                        "$minutes 分钟",
-                        enabled = writable,
-                        description = "拦截浮层上的第 ${index + 1} 个时长快选按钮，点击即按该时长开始本次使用。",
-                    ) {
+                    SettingRow("快选档位 ${index + 1}", "$minutes 分钟", enabled = writable) {
                         editRequest = NumberEditRequest(
                             title = "快选档位 ${index + 1}（分钟）",
                             initial = minutes,
@@ -230,18 +226,16 @@ internal fun SettingsScreen(onBack: () -> Unit) {
                             max = 1440,
                             unit = "分钟",
                         ) { value ->
-                            scope.launch {
-                                repo.updateDefaultTimeParams { t ->
-                                    val list = t.quickOptionsMinutes.toMutableList()
-                                    if (index < list.size) list[index] = value else list.add(value)
-                                    t.copy(quickOptionsMinutes = list)
-                                }
+                            repo.updateDefaultTimeParams { t ->
+                                val list = t.quickOptionsMinutes.toMutableList()
+                                if (index < list.size) list[index] = value else list.add(value)
+                                t.copy(quickOptionsMinutes = list)
                             }
                         }
                     }
                 }
 
-                SectionSubHeader("浮层按钮保护（按下后数秒不可点，防习惯性误触）")
+                SectionSubHeader("浮层按钮保护（按下后数秒不可点，打断习惯性无脑点击）")
                 SettingRow(
                     "快选按钮保护",
                     "${tp.quickProtectMillis / 1000} 秒",
@@ -253,10 +247,10 @@ internal fun SettingsScreen(onBack: () -> Unit) {
                     }
                 }
                 SettingRow(
-                    "确定按钮保护（时间已到 / 额度用尽）",
+                    "确定按钮保护（额度用尽）",
                     "${tp.confirmProtectMillis / 1000} 秒",
                     enabled = writable,
-                    description = "「确定，返回桌面」按钮需等待的秒数。",
+                    description = "「额度用尽」浮层的确定按钮需等待的秒数（时间已到即进冷却，其返回桌面按钮不设保护）。",
                 ) {
                     editRequest = secondsRequest("确定按钮保护（秒）", tp.confirmProtectMillis) { value ->
                         repo.updateDefaultTimeParams { it.copy(confirmProtectMillis = value * 1000L) }
@@ -281,7 +275,7 @@ internal fun SettingsScreen(onBack: () -> Unit) {
                     description = "时间用尽后可临时续用的时长（用于收尾），每次会话限用一次。",
                 ) {
                     editRequest = NumberEditRequest("延时时长（分钟）", tp.extensionMinutes, 1, 180, "分钟") { value ->
-                        scope.launch { repo.updateDefaultTimeParams { it.copy(extensionMinutes = value) } }
+                        repo.updateDefaultTimeParams { it.copy(extensionMinutes = value) }
                     }
                 }
                 SettingRow(
@@ -291,14 +285,14 @@ internal fun SettingsScreen(onBack: () -> Unit) {
                     description = "延时结束前多少秒 Toast 预告即将锁定。",
                 ) {
                     editRequest = NumberEditRequest("延时预告提前（秒）", tp.extensionPrewarnSeconds, 0, 600, "秒") { value ->
-                        scope.launch { repo.updateDefaultTimeParams { it.copy(extensionPrewarnSeconds = value) } }
+                        repo.updateDefaultTimeParams { it.copy(extensionPrewarnSeconds = value) }
                     }
                 }
 
                 SectionSubHeader("宽限期与冷却")
                 SettingRow(
                     "宽限期",
-                    "${tp.gracePeriodMillis / 60_000} 分钟",
+                    if (tp.smartTimingEnabled) "智能（${tp.smartGracePercent}% × 所选时长，保底 2 分）" else "${tp.gracePeriodMillis / 60_000} 分钟",
                     enabled = writable,
                     description = "退到后台后计时暂停、会话不重置的最长时长；超过即判中途放弃。",
                 ) {
@@ -308,7 +302,7 @@ internal fun SettingsScreen(onBack: () -> Unit) {
                 }
                 SettingRow(
                     "放弃冷却",
-                    "${tp.abandonCooldownMillis / 60_000} 分钟",
+                    if (tp.smartTimingEnabled) "智能（${tp.smartAbandonCooldownPercent}% × 实际已用）" else "${tp.abandonCooldownMillis / 60_000} 分钟",
                     enabled = writable,
                     description = "中途放弃（宽限期耗尽仍未回来）后的禁入时长，默认短于到期冷却。",
                 ) {
@@ -318,12 +312,82 @@ internal fun SettingsScreen(onBack: () -> Unit) {
                 }
                 SettingRow(
                     "到期冷却",
-                    "${tp.expiryCooldownMillis / 60_000} 分钟",
+                    if (tp.smartTimingEnabled) "智能（${tp.smartExpiryCooldownPercent}% × 实际使用）" else "${tp.expiryCooldownMillis / 60_000} 分钟",
                     enabled = writable,
-                    description = "时间用尽并确认返回桌面后的禁入时长；倒计时只在你不在该应用内时推进。",
+                    description = "时间用尽后的禁入时长；倒计时按墙钟推进，走完且你仍停留时原地回时间选择。",
                 ) {
                     editRequest = minutesRequest("到期冷却（分钟）", tp.expiryCooldownMillis) { value ->
                         repo.updateDefaultTimeParams { it.copy(expiryCooldownMillis = value * 60_000L) }
+                    }
+                }
+
+                SectionSubHeader("智能时长联动（按使用时长比例计算）")
+                SettingToggleRow(
+                    "智能时长联动",
+                    if (tp.smartTimingEnabled) "按比例计算" else "用固定值",
+                    checked = tp.smartTimingEnabled,
+                    enabled = writable,
+                    description = "开启后到期冷却 / 宽限期 / 放弃冷却分别按比例 × 基数实时计算" +
+                        "（结果不足 1 分钟保留秒级，达到 1 分钟向上取整；宽限保底 2 分钟）。",
+                ) { on ->
+                    scope.launch { repo.updateDefaultTimeParams { it.copy(smartTimingEnabled = on) } }
+                }
+                if (tp.smartTimingEnabled) {
+                    SettingRow("到期冷却比例", "${tp.smartExpiryCooldownPercent}%", enabled = writable) {
+                        editRequest = NumberEditRequest("到期冷却比例（%）", tp.smartExpiryCooldownPercent, 0, 100, "%") { value ->
+                            repo.updateDefaultTimeParams { it.copy(smartExpiryCooldownPercent = value) }
+                        }
+                    }
+                    SettingRow("宽限期比例", "${tp.smartGracePercent}%", enabled = writable) {
+                        editRequest = NumberEditRequest("宽限期比例（%）", tp.smartGracePercent, 0, 100, "%") { value ->
+                            repo.updateDefaultTimeParams { it.copy(smartGracePercent = value) }
+                        }
+                    }
+                    SettingRow("放弃冷却比例", "${tp.smartAbandonCooldownPercent}%", enabled = writable) {
+                        editRequest = NumberEditRequest("放弃冷却比例（%）", tp.smartAbandonCooldownPercent, 0, 100, "%") { value ->
+                            repo.updateDefaultTimeParams { it.copy(smartAbandonCooldownPercent = value) }
+                        }
+                    }
+                }
+
+                SectionSubHeader("同组共享冷却")
+                SettingToggleRow(
+                    "同组共享冷却",
+                    if (tp.sharedCooldownEnabled) "已开启" else "已关闭",
+                    checked = tp.sharedCooldownEnabled,
+                    enabled = writable,
+                    description = "本组某应用进入冷却时，按比例分发给组内闲置/待选择的成员" +
+                        "（不打断会话中/宽限中/已在冷却中的成员；接收方无延时按钮）。",
+                ) { on ->
+                    scope.launch { repo.updateDefaultTimeParams { it.copy(sharedCooldownEnabled = on) } }
+                }
+                if (tp.sharedCooldownEnabled) {
+                    SettingRow("共享折算比例", "${tp.sharedCooldownPercent}%", enabled = writable) {
+                        editRequest = NumberEditRequest("共享折算比例（%）", tp.sharedCooldownPercent, 0, 100, "%") { value ->
+                            repo.updateDefaultTimeParams { it.copy(sharedCooldownPercent = value) }
+                        }
+                    }
+                }
+
+                SectionSubHeader("延迟选时（打开后先试探后选时）")
+                SettingRow(
+                    "试探期时长",
+                    "${tp.delayedSelectionMinutes} 分钟",
+                    enabled = writable,
+                    description = "「延迟选时」机制开启时，打开应用后前台累计满该时长弹时间选择浮层；计入每日限额。",
+                ) {
+                    editRequest = NumberEditRequest("试探期时长（分钟）", tp.delayedSelectionMinutes, 1, 1440, "分钟") { value ->
+                        repo.updateDefaultTimeParams { it.copy(delayedSelectionMinutes = value) }
+                    }
+                }
+                SettingRow(
+                    "试探中断保留",
+                    "${tp.delayedSelectionRetentionMillis / 60_000} 分钟",
+                    enabled = writable,
+                    description = "试探期退后台的保留时长：超过后进度清零，保留期内回来续计。",
+                ) {
+                    editRequest = NumberEditRequest("试探中断保留（分钟）", (tp.delayedSelectionRetentionMillis / 60_000).toInt(), 1, 1440, "分钟") { value ->
+                        repo.updateDefaultTimeParams { it.copy(delayedSelectionRetentionMillis = value * 60_000L) }
                     }
                 }
 
@@ -356,7 +420,7 @@ internal fun SettingsScreen(onBack: () -> Unit) {
                     description = "拦截浮层假数字键盘可输入的最大分钟数。",
                 ) {
                     editRequest = NumberEditRequest("自定义时长上限（分钟）", tp.customMaxMinutes, 1, 1440, "分钟") { value ->
-                        scope.launch { repo.updateDefaultTimeParams { it.copy(customMaxMinutes = value) } }
+                        repo.updateDefaultTimeParams { it.copy(customMaxMinutes = value) }
                     }
                 }
                 NewGroupDailyLimitEditor(
@@ -365,7 +429,7 @@ internal fun SettingsScreen(onBack: () -> Unit) {
                     onSelect = { value -> scope.launch { repo.setNewGroupDailyLimitMinutes(value) } },
                     onEditValue = {
                         editRequest = NumberEditRequest("每日限额（分钟）", currentLimit, 1, 1440, "分钟") { value ->
-                            scope.launch { repo.setNewGroupDailyLimitMinutes(value) }
+                            repo.setNewGroupDailyLimitMinutes(value)
                         }
                     },
                 )
@@ -534,6 +598,35 @@ private fun SettingRow(
     }
 }
 
+/** 开关型设置行（与 [SettingRow] 同版式，右侧为 Switch）。 */
+@Composable
+private fun SettingToggleRow(
+    label: String,
+    value: String,
+    checked: Boolean,
+    enabled: Boolean = true,
+    description: String? = null,
+    onCheckedChange: (Boolean) -> Unit,
+) {
+    Row(
+        Modifier.fillMaxWidth().padding(vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(label, style = MaterialTheme.typography.bodyLarge)
+            description?.let {
+                Text(
+                    it,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        Text(value, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(end = 8.dp))
+        Switch(checked = checked, enabled = enabled, onCheckedChange = onCheckedChange)
+    }
+}
+
 private fun secondsRequest(
     title: String,
     currentMillis: Long,
@@ -567,10 +660,11 @@ private data class NumberEditRequest(
 private fun NumberEditDialog(request: NumberEditRequest, onDismiss: () -> Unit) {
     val scope = rememberCoroutineScope()
     var text by remember(request) { mutableStateOf(request.initial.toString()) }
+    var committing by remember { mutableStateOf(false) }
     val value = text.toIntOrNull()
     val valid = value != null && value in request.min..request.max
     AlertDialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = { if (!committing) onDismiss() },
         title = { Text(request.title) },
         text = {
             OutlinedTextField(
@@ -583,15 +677,28 @@ private fun NumberEditDialog(request: NumberEditRequest, onDismiss: () -> Unit) 
             )
         },
         confirmButton = {
-            TextButton(
-                enabled = valid,
-                onClick = {
-                    onDismiss()
-                    value?.let { commit -> scope.launch { request.onCommit(commit) } }
-                },
-            ) { Text("确定") }
+            if (committing) {
+                // 写入经 DataStore 落盘并触发热更新，期间对话框保持 + 转圈反馈
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                    Spacer(Modifier.width(6.dp))
+                    Text("应用中…", fontSize = 13.sp)
+                }
+            } else {
+                TextButton(
+                    enabled = valid,
+                    onClick = {
+                        committing = true
+                        val commit = value
+                        scope.launch {
+                            commit?.let { request.onCommit(it) }
+                            onDismiss()
+                        }
+                    },
+                ) { Text("确定") }
+            }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+        dismissButton = { TextButton(enabled = !committing, onClick = onDismiss) { Text("取消") } },
     )
 }
 

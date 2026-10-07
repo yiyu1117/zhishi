@@ -6,12 +6,15 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -25,6 +28,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.zhishi.core.model.GroupConfig
 import kotlinx.coroutines.launch
 
@@ -118,12 +122,7 @@ internal fun GroupConfigEditSection(
 
         GroupSubHeader("快选档位（拦截浮层的时长按钮）")
         time.quickOptionsMinutes.forEachIndexed { index, minutes ->
-            GroupSettingRow(
-                "快选档位 ${index + 1}",
-                "$minutes 分钟",
-                enabled = writable,
-                description = "拦截浮层上的第 ${index + 1} 个时长快选按钮，点击即按该时长开始本次使用。",
-            ) {
+            GroupSettingRow("快选档位 ${index + 1}", "$minutes 分钟", enabled = writable) {
                 editRequest = GroupEditRequest(
                     title = "快选档位 ${index + 1}（分钟）",
                     initial = minutes,
@@ -154,10 +153,10 @@ internal fun GroupConfigEditSection(
             }
         }
         GroupSettingRow(
-            "确定按钮保护（时间已到 / 额度用尽）",
+            "确定按钮保护（额度用尽）",
             "${time.confirmProtectMillis / 1000} 秒",
             enabled = writable,
-            description = "「确定，返回桌面」按钮需等待的秒数。",
+            description = "「额度用尽」浮层的确定按钮需等待的秒数（时间已到即进冷却，其返回桌面按钮不设保护）。",
         ) {
             editRequest = GroupEditRequest(
                 title = "确定按钮保护（秒）",
@@ -215,7 +214,11 @@ internal fun GroupConfigEditSection(
         GroupSubHeader("宽限期与冷却")
         GroupSettingRow(
             "宽限期",
-            "${time.gracePeriodMillis / 60_000} 分钟",
+            if (time.smartTimingEnabled) {
+                "智能（${time.smartGracePercent}% × 所选时长，保底 2 分）"
+            } else {
+                "${time.gracePeriodMillis / 60_000} 分钟"
+            },
             enabled = writable,
             description = "退到后台后计时暂停、会话不重置的最长时长；超过即判中途放弃。",
         ) {
@@ -229,7 +232,11 @@ internal fun GroupConfigEditSection(
         }
         GroupSettingRow(
             "放弃冷却",
-            "${time.abandonCooldownMillis / 60_000} 分钟",
+            if (time.smartTimingEnabled) {
+                "智能（${time.smartAbandonCooldownPercent}% × 实际已用）"
+            } else {
+                "${time.abandonCooldownMillis / 60_000} 分钟"
+            },
             enabled = writable,
             description = "中途放弃（宽限期耗尽仍未回来）后的禁入时长，默认短于到期冷却。",
         ) {
@@ -243,9 +250,13 @@ internal fun GroupConfigEditSection(
         }
         GroupSettingRow(
             "到期冷却",
-            "${time.expiryCooldownMillis / 60_000} 分钟",
+            if (time.smartTimingEnabled) {
+                "智能（${time.smartExpiryCooldownPercent}% × 实际使用）"
+            } else {
+                "${time.expiryCooldownMillis / 60_000} 分钟"
+            },
             enabled = writable,
-            description = "时间用尽并确认返回桌面后的禁入时长；倒计时只在你不在该应用内时推进。",
+            description = "时间用尽后的禁入时长；倒计时按墙钟推进，走完且你仍停留时原地回时间选择。",
         ) {
             editRequest = GroupEditRequest(
                 title = "到期冷却（分钟）",
@@ -253,6 +264,100 @@ internal fun GroupConfigEditSection(
                 min = 1, max = 1440, unit = "分钟",
             ) { value ->
                 onUpdate(config.copy(time = time.copy(expiryCooldownMillis = value * 60_000L)))
+            }
+        }
+
+        GroupSubHeader("智能时长联动（按使用时长比例计算）")
+        GroupToggleRow(
+            "智能时长联动",
+            if (time.smartTimingEnabled) "按比例计算" else "用固定值",
+            checked = time.smartTimingEnabled,
+            enabled = writable,
+            description = "开启后到期冷却 / 宽限期 / 放弃冷却分别按比例 × 基数实时计算" +
+                "（结果不足 1 分钟保留秒级，达到 1 分钟向上取整；宽限保底 2 分钟）。",
+        ) { on ->
+            scope.launch { onUpdate(config.copy(time = time.copy(smartTimingEnabled = on))) }
+        }
+        if (time.smartTimingEnabled) {
+            GroupSettingRow("到期冷却比例", "${time.smartExpiryCooldownPercent}%", enabled = writable) {
+                editRequest = GroupEditRequest(
+                    title = "到期冷却比例（%）",
+                    initial = time.smartExpiryCooldownPercent,
+                    min = 0, max = 100, unit = "%",
+                ) { value ->
+                    onUpdate(config.copy(time = time.copy(smartExpiryCooldownPercent = value)))
+                }
+            }
+            GroupSettingRow("宽限期比例", "${time.smartGracePercent}%", enabled = writable) {
+                editRequest = GroupEditRequest(
+                    title = "宽限期比例（%）",
+                    initial = time.smartGracePercent,
+                    min = 0, max = 100, unit = "%",
+                ) { value ->
+                    onUpdate(config.copy(time = time.copy(smartGracePercent = value)))
+                }
+            }
+            GroupSettingRow("放弃冷却比例", "${time.smartAbandonCooldownPercent}%", enabled = writable) {
+                editRequest = GroupEditRequest(
+                    title = "放弃冷却比例（%）",
+                    initial = time.smartAbandonCooldownPercent,
+                    min = 0, max = 100, unit = "%",
+                ) { value ->
+                    onUpdate(config.copy(time = time.copy(smartAbandonCooldownPercent = value)))
+                }
+            }
+        }
+
+        GroupSubHeader("同组共享冷却")
+        GroupToggleRow(
+            "同组共享冷却",
+            if (time.sharedCooldownEnabled) "已开启" else "已关闭",
+            checked = time.sharedCooldownEnabled,
+            enabled = writable,
+            description = "本组某应用进入冷却时，按比例分发给组内闲置/待选择的成员" +
+                "（不打断会话中/宽限中/已在冷却中的成员；接收方无延时按钮）。",
+        ) { on ->
+            scope.launch { onUpdate(config.copy(time = time.copy(sharedCooldownEnabled = on))) }
+        }
+        if (time.sharedCooldownEnabled) {
+            GroupSettingRow("共享折算比例", "${time.sharedCooldownPercent}%", enabled = writable) {
+                editRequest = GroupEditRequest(
+                    title = "共享折算比例（%）",
+                    initial = time.sharedCooldownPercent,
+                    min = 0, max = 100, unit = "%",
+                ) { value ->
+                    onUpdate(config.copy(time = time.copy(sharedCooldownPercent = value)))
+                }
+            }
+        }
+
+        GroupSubHeader("延迟选时（打开后先试探后选时）")
+        GroupSettingRow(
+            "试探期时长",
+            "${time.delayedSelectionMinutes} 分钟",
+            enabled = writable,
+            description = "「延迟选时」机制开启时，打开应用后前台累计满该时长弹时间选择浮层；计入每日限额。",
+        ) {
+            editRequest = GroupEditRequest(
+                title = "试探期时长（分钟）",
+                initial = time.delayedSelectionMinutes,
+                min = 1, max = 1440, unit = "分钟",
+            ) { value ->
+                onUpdate(config.copy(time = time.copy(delayedSelectionMinutes = value)))
+            }
+        }
+        GroupSettingRow(
+            "试探中断保留",
+            "${time.delayedSelectionRetentionMillis / 60_000} 分钟",
+            enabled = writable,
+            description = "试探期退后台的保留时长：超过后进度清零，保留期内回来续计。",
+        ) {
+            editRequest = GroupEditRequest(
+                title = "试探中断保留（分钟）",
+                initial = (time.delayedSelectionRetentionMillis / 60_000).toInt(),
+                min = 1, max = 1440, unit = "分钟",
+            ) { value ->
+                onUpdate(config.copy(time = time.copy(delayedSelectionRetentionMillis = value * 60_000L)))
             }
         }
 
@@ -360,6 +465,35 @@ private fun GroupSettingRow(
     }
 }
 
+/** 开关型配置行（与 [GroupSettingRow] 同版式，右侧为 Switch）。 */
+@Composable
+private fun GroupToggleRow(
+    label: String,
+    value: String,
+    checked: Boolean,
+    enabled: Boolean,
+    description: String? = null,
+    onCheckedChange: (Boolean) -> Unit,
+) {
+    Row(
+        Modifier.fillMaxWidth().padding(vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(label, style = MaterialTheme.typography.bodyLarge)
+            description?.let {
+                Text(
+                    it,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        Text(value, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(end = 8.dp))
+        Switch(checked = checked, enabled = enabled, onCheckedChange = onCheckedChange)
+    }
+}
+
 // region 数值编辑对话框（与设置页 NumberEditDialog 同范式）
 
 private data class GroupEditRequest(
@@ -375,10 +509,11 @@ private data class GroupEditRequest(
 private fun GroupEditDialog(request: GroupEditRequest, onDismiss: () -> Unit) {
     val scope = rememberCoroutineScope()
     var text by remember(request) { mutableStateOf(request.initial.toString()) }
+    var committing by remember { mutableStateOf(false) }
     val value = text.toIntOrNull()
     val valid = value != null && value in request.min..request.max
     AlertDialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = { if (!committing) onDismiss() },
         title = { Text(request.title) },
         text = {
             OutlinedTextField(
@@ -391,15 +526,28 @@ private fun GroupEditDialog(request: GroupEditRequest, onDismiss: () -> Unit) {
             )
         },
         confirmButton = {
-            TextButton(
-                enabled = valid,
-                onClick = {
-                    onDismiss()
-                    value?.let { commit -> scope.launch { request.onCommit(commit) } }
-                },
-            ) { Text("确定") }
+            if (committing) {
+                // 写入经 DataStore 落盘并触发热更新，期间对话框保持 + 转圈反馈
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                    Spacer(Modifier.width(6.dp))
+                    Text("应用中…", fontSize = 13.sp)
+                }
+            } else {
+                TextButton(
+                    enabled = valid,
+                    onClick = {
+                        committing = true
+                        val commit = value
+                        scope.launch {
+                            commit?.let { request.onCommit(it) }
+                            onDismiss()
+                        }
+                    },
+                ) { Text("确定") }
+            }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+        dismissButton = { TextButton(enabled = !committing, onClick = onDismiss) { Text("取消") } },
     )
 }
 

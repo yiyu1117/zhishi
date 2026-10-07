@@ -79,7 +79,8 @@ class GroupRepository(private val appContext: Context) {
 
     /**
      * 新组由设置中的全局默认参数播种（时间参数 + 新组默认每日限额）；
-     * 六项机制默认全开（分组配置新建即管控，避免「加了应用却不拦截」的空配置组）。
+     * 七项机制默认全开（分组配置新建即管控，避免「加了应用却不拦截」的空配置组），
+     * 唯延迟选时与开屏时间选择互斥——播种时关掉延迟选时，保持开屏即选的默认体验。
      */
     suspend fun createGroup(
         name: String,
@@ -88,7 +89,7 @@ class GroupRepository(private val appContext: Context) {
     ): Group {
         val id = "custom-" + UUID.randomUUID().toString().substring(0, 8)
         val seedConfig = GroupConfig(
-            mechanisms = Mechanism.entries.toSet(),
+            mechanisms = Mechanism.entries.filter { it != Mechanism.DELAYED_SELECTION }.toSet(),
             dailyLimitMinutes = seedDailyLimitMinutes,
             time = seedTime,
         )
@@ -96,14 +97,14 @@ class GroupRepository(private val appContext: Context) {
             val order = (prefs[CUSTOM_ORDER_KEY]?.split(',')?.filter { it.isNotBlank() } ?: emptyList()) + id
             prefs[CUSTOM_ORDER_KEY] = order.joinToString(",")
             prefs[nameKey(id)] = name
-            prefs[timeKey(id)] = encodeTimeParams(seedConfig.time)
+            prefs[timeKey(id)] = TimeParamsFormat.encode(seedConfig.time)
             prefs[limitKey(id)] = seedConfig.dailyLimitMinutes
             prefs[mechKey(id)] = seedConfig.mechanisms.joinToString(",") { it.ordinal.toString() }
         }
         return Group(id, name, GroupKind.CUSTOM, seedConfig)
     }
 
-    /** 删除自定义分组；内置组拒绝。成员回归默认组（移除分配键即回到兜底）。 */
+    /** 新建自定义分组；内置组拒绝。成员回归默认组（移除分配键即回到兜底）。 */
     suspend fun deleteGroup(groupId: String) {
         if (groupId in GroupIds.BUILT_IN) return
         dataStore.edit { prefs ->
@@ -122,6 +123,16 @@ class GroupRepository(private val appContext: Context) {
         }
     }
 
+    /** 重命名自定义分组（仅自定义组可改名；内置组名称为固定展示文案）。 */
+    suspend fun renameGroup(groupId: String, newName: String) {
+        if (groupId in GroupIds.BUILT_IN) return
+        val name = newName.trim()
+        if (name.isEmpty()) return
+        dataStore.edit { prefs ->
+            prefs[nameKey(groupId)] = name
+        }
+    }
+
     /** 移动语义：每应用一个分配键，天然"从原组移出"；分配到默认组即移除键。 */
     suspend fun assignApp(packageName: String, groupId: String) {
         dataStore.edit { prefs ->
@@ -136,7 +147,7 @@ class GroupRepository(private val appContext: Context) {
         dataStore.edit { prefs ->
             prefs[mechKey(groupId)] = effective.mechanisms.joinToString(",") { it.ordinal.toString() }
             prefs[limitKey(groupId)] = effective.dailyLimitMinutes
-            prefs[timeKey(groupId)] = encodeTimeParams(effective.time)
+            prefs[timeKey(groupId)] = TimeParamsFormat.encode(effective.time)
         }
         _configUpdates.tryEmit(GroupConfigUpdate(groupId, effective))
     }
@@ -184,45 +195,9 @@ class GroupRepository(private val appContext: Context) {
             ?.toSet()
             ?: seed.mechanisms
         val limit = prefs[limitKey(id)] ?: seed.dailyLimitMinutes
-        val time = prefs[timeKey(id)]?.let(::decodeTimeParams) ?: seed.time
+        val time = prefs[timeKey(id)]?.let(TimeParamsFormat::decode) ?: seed.time
         return GroupConfig(mechanisms, limit, time)
     }
-
-    private fun decodeTimeParams(encoded: String): TimeParams? = runCatching {
-        val parts = encoded.split(';')
-        val seed = TimeParams()
-        TimeParams(
-            quickOptionsMinutes = parts.getOrNull(0)?.split(',')?.mapNotNull(String::toIntOrNull)
-                ?.takeIf { it.isNotEmpty() } ?: seed.quickOptionsMinutes,
-            quickProtectMillis = parts.getOrNull(1)?.toLongOrNull() ?: seed.quickProtectMillis,
-            confirmProtectMillis = parts.getOrNull(2)?.toLongOrNull() ?: seed.confirmProtectMillis,
-            extensionProtectMillis = parts.getOrNull(3)?.toLongOrNull() ?: seed.extensionProtectMillis,
-            extensionMinutes = parts.getOrNull(4)?.toIntOrNull() ?: seed.extensionMinutes,
-            extensionPrewarnSeconds = parts.getOrNull(5)?.toIntOrNull() ?: seed.extensionPrewarnSeconds,
-            gracePeriodMillis = parts.getOrNull(6)?.toLongOrNull() ?: seed.gracePeriodMillis,
-            abandonCooldownMillis = parts.getOrNull(7)?.toLongOrNull() ?: seed.abandonCooldownMillis,
-            expiryCooldownMillis = parts.getOrNull(8)?.toLongOrNull() ?: seed.expiryCooldownMillis,
-            usageToastIntervalMillis = parts.getOrNull(9)?.toLongOrNull() ?: seed.usageToastIntervalMillis,
-            reminderMarksMinutes = parts.getOrNull(10)?.split(',')?.mapNotNull(String::toIntOrNull)
-                ?.takeIf { it.isNotEmpty() } ?: seed.reminderMarksMinutes,
-            customMaxMinutes = parts.getOrNull(11)?.toIntOrNull() ?: seed.customMaxMinutes,
-        )
-    }.getOrNull()
-
-    private fun encodeTimeParams(t: TimeParams): String = listOf(
-        t.quickOptionsMinutes.joinToString(","),
-        t.quickProtectMillis,
-        t.confirmProtectMillis,
-        t.extensionProtectMillis,
-        t.extensionMinutes,
-        t.extensionPrewarnSeconds,
-        t.gracePeriodMillis,
-        t.abandonCooldownMillis,
-        t.expiryCooldownMillis,
-        t.usageToastIntervalMillis,
-        t.reminderMarksMinutes.joinToString(","),
-        t.customMaxMinutes,
-    ).joinToString(";")
 
     // endregion
 

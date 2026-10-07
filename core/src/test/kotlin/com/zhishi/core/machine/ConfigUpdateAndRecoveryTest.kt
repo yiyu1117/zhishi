@@ -98,7 +98,15 @@ class ConfigUpdateAndRecoveryTest {
         tickAfter(machine, clock, 3 * 60_000L)
 
         val data = machine.exportState()
-        assertEquals(GuardStateData(GuardState.RUNNING, remainingMillis = 7 * 60_000L, extensionUsed = false), data)
+        assertEquals(
+            GuardStateData(
+                GuardState.RUNNING,
+                remainingMillis = 7 * 60_000L,
+                extensionUsed = false,
+                sessionSelectedMillis = 10 * 60_000L,
+            ),
+            data,
+        )
 
         val restoredMachine = newMachine(testConfig(Mechanism.TIME_SELECTION), clock, restored = data)
         val snapshot = restoredMachine.snapshot.value
@@ -163,10 +171,10 @@ class ConfigUpdateAndRecoveryTest {
     @Test
     fun `延时期按剩余恢复且回前台前冻结`() {
         val clock = FakeClock()
-        val machine = newMachine(testConfig(Mechanism.TIME_SELECTION, Mechanism.EXTENSION), clock)
+        val machine = newMachine(testConfig(Mechanism.TIME_SELECTION, Mechanism.EXTENSION, Mechanism.EXPIRY_COOLDOWN), clock)
         startSession(machine, 2)
-        tickAfter(machine, clock, 2 * 60_000L) // → TIME_UP
-        machine.dispatch(GuardEvent.ExtensionRequested)
+        tickAfter(machine, clock, 2 * 60_000L) // → 到期即冷却
+        machine.dispatch(GuardEvent.ExtensionRequested) // pending = 满额 8 分钟
         tickAfter(machine, clock, 30_000L) // 延时剩 90 秒
 
         val data = machine.exportState()
@@ -174,7 +182,11 @@ class ConfigUpdateAndRecoveryTest {
         assertEquals(90_000L, data.remainingMillis)
         assertEquals(true, data.extensionUsed)
 
-        val restored = newMachine(testConfig(Mechanism.TIME_SELECTION, Mechanism.EXTENSION), clock, restored = data)
+        val restored = newMachine(
+            testConfig(Mechanism.TIME_SELECTION, Mechanism.EXTENSION, Mechanism.EXPIRY_COOLDOWN),
+            clock,
+            restored = data,
+        )
         assertEquals(GuardState.EXTENSION_RUNNING, restored.snapshot.value.state)
         assertEquals(90_000L, restored.snapshot.value.remainingMillis)
 
@@ -182,38 +194,37 @@ class ConfigUpdateAndRecoveryTest {
         tickAfter(restored, clock, 60_000L)
         assertEquals(90_000L, restored.snapshot.value.remainingMillis)
 
-        // 回前台后恢复计时并走完回 TIME_UP（延时已用）
+        // 回前台后恢复计时并走完回冷却（按 pending 剩余续接，延时已用）
         restored.dispatch(GuardEvent.ForegroundEntered)
-        tickAfter(restored, clock, 90_000L)
-        assertEquals(GuardState.TIME_UP, restored.snapshot.value.state)
-        val timeUp = assertIs<OverlaySpec.TimeUp>(restored.snapshot.value.overlay)
-        assertEquals(false, timeUp.extensionAvailable)
+        val effects = tickAfter(restored, clock, 90_000L)
+        assertEquals(GuardState.EXPIRY_COOLDOWN, restored.snapshot.value.state)
+        assertEquals(480_000L, restored.snapshot.value.remainingMillis)
+        val cooldown = assertIs<OverlaySpec.Cooldown>(overlaySpecs(effects).single())
+        assertEquals(false, cooldown.extensionAvailable)
     }
 
     @Test
-    fun `时间已到与延时已用标记完整恢复`() {
+    fun `旧版本落盘的TIME_UP恢复为到期冷却`() {
         val clock = FakeClock()
-        val machine = newMachine(testConfig(Mechanism.TIME_SELECTION, Mechanism.EXTENSION, Mechanism.EXPIRY_COOLDOWN), clock)
-        startSession(machine, 2)
-        tickAfter(machine, clock, 2 * 60_000L)
-        machine.dispatch(GuardEvent.ExtensionRequested)
-        tickAfter(machine, clock, 2 * 60_000L) // 延时走完 → TIME_UP
+        val data = GuardStateData(kind = GuardState.TIME_UP, extensionUsed = true)
 
-        val data = machine.exportState()
-        assertEquals(GuardState.TIME_UP, data.kind)
-        assertEquals(true, data.extensionUsed)
-
-        val restored = newMachine(testConfig(Mechanism.TIME_SELECTION, Mechanism.EXTENSION, Mechanism.EXPIRY_COOLDOWN), clock, restored = data)
-        assertEquals(GuardState.TIME_UP, restored.snapshot.value.state)
-
-        val effects = restored.dispatch(GuardEvent.ForegroundEntered)
-        val timeUp = assertIs<OverlaySpec.TimeUp>(overlaySpecs(effects).single())
-        assertEquals(false, timeUp.extensionAvailable) // 延时已用标记随恢复保留
-
-        // 确定后进入到期冷却，流程闭环
-        restored.dispatch(GuardEvent.ConfirmExit)
+        val restored = newMachine(
+            testConfig(Mechanism.TIME_SELECTION, Mechanism.EXTENSION, Mechanism.EXPIRY_COOLDOWN),
+            clock,
+            restored = data,
+        )
+        // v1.0 语义中 TIME_UP 确定后进满额到期冷却；恢复直接续接该冷却
         assertEquals(GuardState.EXPIRY_COOLDOWN, restored.snapshot.value.state)
         assertEquals(480_000L, restored.snapshot.value.remainingMillis)
+
+        val effects = restored.dispatch(GuardEvent.ForegroundEntered)
+        val cooldown = assertIs<OverlaySpec.Cooldown>(overlaySpecs(effects).single())
+        assertEquals(false, cooldown.extensionAvailable) // 延时已用标记随恢复保留
+
+        // 冷却走完流程闭环
+        restored.dispatch(GuardEvent.Backgrounded)
+        tickAfter(restored, clock, 480_000L)
+        assertEquals(GuardState.INACTIVE, restored.snapshot.value.state)
     }
 
     @Test

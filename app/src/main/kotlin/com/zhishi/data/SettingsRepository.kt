@@ -70,13 +70,13 @@ class SettingsRepository(private val appContext: Context) {
 
     /** 整体替换默认参数；单字段编辑建议用 [updateDefaultTimeParams]。 */
     suspend fun setDefaultTimeParams(params: TimeParams) {
-        dataStore.edit { it[TIME_PARAMS_KEY] = encodeTimeParams(params) }
+        dataStore.edit { it[TIME_PARAMS_KEY] = TimeParamsFormat.encode(params) }
     }
 
     /** 基于当前存储值转换后保存（读-改-写在同一次 edit 内，无竞态）。 */
     suspend fun updateDefaultTimeParams(transform: (TimeParams) -> TimeParams) {
         dataStore.edit { prefs ->
-            prefs[TIME_PARAMS_KEY] = encodeTimeParams(transform(decodeTimeParams(prefs)))
+            prefs[TIME_PARAMS_KEY] = TimeParamsFormat.encode(transform(decodeTimeParams(prefs)))
         }
     }
 
@@ -130,65 +130,12 @@ class SettingsRepository(private val appContext: Context) {
 
     private fun decodeTimeParams(prefs: Preferences): TimeParams {
         val encoded = prefs[TIME_PARAMS_KEY] ?: return TimeParams()
-        return parseTimeParams(encoded) ?: TimeParams()
+        return TimeParamsFormat.decode(encoded) ?: TimeParams()
     }
-
-    /** 与 GroupRepository 的 TimeParams 编码格式一致（12 段分号分隔），便于主控统一处理。 */
-    private fun parseTimeParams(encoded: String): TimeParams? = runCatching {
-        val parts = encoded.split(';')
-        val seed = TimeParams()
-        TimeParams(
-            quickOptionsMinutes = parts.getOrNull(0)
-                ?.split(',')?.mapNotNull(String::toIntOrNull)?.filter { it > 0 }
-                ?.takeIf { it.size == QUICK_OPTION_COUNT }
-                ?: seed.quickOptionsMinutes,
-            quickProtectMillis = parts.getOrNull(1)?.toLongOrNull()?.coerceAtLeast(0)
-                ?: seed.quickProtectMillis,
-            confirmProtectMillis = parts.getOrNull(2)?.toLongOrNull()?.coerceAtLeast(0)
-                ?: seed.confirmProtectMillis,
-            extensionProtectMillis = parts.getOrNull(3)?.toLongOrNull()?.coerceAtLeast(0)
-                ?: seed.extensionProtectMillis,
-            extensionMinutes = parts.getOrNull(4)?.toIntOrNull()?.takeIf { it > 0 }
-                ?: seed.extensionMinutes,
-            extensionPrewarnSeconds = parts.getOrNull(5)?.toIntOrNull()?.coerceIn(0, 600)
-                ?: seed.extensionPrewarnSeconds,
-            gracePeriodMillis = parts.getOrNull(6)?.toLongOrNull()?.coerceAtLeast(0)
-                ?: seed.gracePeriodMillis,
-            abandonCooldownMillis = parts.getOrNull(7)?.toLongOrNull()?.coerceAtLeast(0)
-                ?: seed.abandonCooldownMillis,
-            expiryCooldownMillis = parts.getOrNull(8)?.toLongOrNull()?.coerceAtLeast(0)
-                ?: seed.expiryCooldownMillis,
-            usageToastIntervalMillis = parts.getOrNull(9)?.toLongOrNull()?.takeIf { it > 0 }
-                ?: seed.usageToastIntervalMillis,
-            // 空串 = 用户删光刻度（合法状态，不回退到默认 5/2/1）
-            reminderMarksMinutes = parts.getOrNull(10)
-                ?.split(',')?.mapNotNull(String::toIntOrNull)?.filter { it > 0 }
-                ?.distinct()?.sortedDescending()
-                ?: seed.reminderMarksMinutes,
-            customMaxMinutes = parts.getOrNull(11)?.toIntOrNull()?.takeIf { it > 0 }
-                ?: seed.customMaxMinutes,
-        )
-    }.getOrNull()
-
-    private fun encodeTimeParams(t: TimeParams): String = listOf(
-        t.quickOptionsMinutes.joinToString(","),
-        t.quickProtectMillis,
-        t.confirmProtectMillis,
-        t.extensionProtectMillis,
-        t.extensionMinutes,
-        t.extensionPrewarnSeconds,
-        t.gracePeriodMillis,
-        t.abandonCooldownMillis,
-        t.expiryCooldownMillis,
-        t.usageToastIntervalMillis,
-        t.reminderMarksMinutes.joinToString(","),
-        t.customMaxMinutes,
-    ).joinToString(";")
 
     // endregion
 
     private companion object {
-        const val QUICK_OPTION_COUNT = 6
         const val DEFAULT_NEW_GROUP_DAILY_LIMIT = 0
         const val DEFAULT_LOCK_START = 22 * 60
         const val DEFAULT_LOCK_END = 23 * 60

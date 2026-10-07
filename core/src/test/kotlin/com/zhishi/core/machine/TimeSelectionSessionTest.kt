@@ -63,7 +63,7 @@ class TimeSelectionSessionTest {
     }
 
     @Test
-    fun `前台使用至时间耗尽弹时间已到浮层`() {
+    fun `前台使用至时间耗尽且无冷却机制时原地回时间选择`() {
         val clock = FakeClock()
         val machine = newMachine(testConfig(Mechanism.TIME_SELECTION), clock)
         startSession(machine, 5)
@@ -73,24 +73,22 @@ class TimeSelectionSessionTest {
         assertEquals(60_000L, machine.snapshot.value.remainingMillis)
 
         val effects = tickAfter(machine, clock, 60_000L)
-        assertEquals(listOf(GuardEffect.ShowOverlay(OverlaySpec.TimeUp(5_000L, false, 10_000L))), effects)
-        val snapshot = machine.snapshot.value
-        assertEquals(GuardState.TIME_UP, snapshot.state)
-        assertEquals(OverlaySpec.TimeUp(5_000L, false, 10_000L), snapshot.overlay)
-        assertNull(snapshot.remainingMillis)
+        // 到期即冷却，冷却机制未开启 → 原地重入入口语义（时间选择）
+        assertEquals(GuardState.AWAITING_SELECTION, machine.snapshot.value.state)
+        assertIs<OverlaySpec.TimeSelection>(overlaySpecs(effects).single())
     }
 
     @Test
-    fun `到时确定后送回桌面并关闭浮层`() {
+    fun `到时回时间选择后退出送回桌面`() {
         val clock = FakeClock()
         val machine = newMachine(testConfig(Mechanism.TIME_SELECTION), clock)
         startSession(machine, 5)
-        tickAfter(machine, clock, 5 * 60_000L) // → TIME_UP
+        tickAfter(machine, clock, 5 * 60_000L) // → 原地回时间选择
+        assertEquals(GuardState.AWAITING_SELECTION, machine.snapshot.value.state)
 
         val effects = machine.dispatch(GuardEvent.ConfirmExit)
 
-        assertEquals(listOf(GuardEffect.GoHome, GuardEffect.HideOverlay, GuardEffect.FlushState), effects)
-        // 到期冷却机制未开启 → 回 INACTIVE
+        assertEquals(listOf(GuardEffect.GoHome, GuardEffect.HideOverlay), effects)
         assertEquals(GuardState.INACTIVE, machine.snapshot.value.state)
         assertNull(machine.snapshot.value.overlay)
     }

@@ -239,7 +239,6 @@ private fun CountdownHint(enabled: Boolean, protection: FormProtection, protectM
 private fun MachineOverlay(content: OverlayContent.Machine, interactions: OverlayInteractions) {
     when (val spec = content.spec) {
         is OverlaySpec.TimeSelection -> TimeSelectionOverlay(content, spec, interactions)
-        is OverlaySpec.TimeUp -> TimeUpOverlay(content, spec, interactions)
         is OverlaySpec.QuotaExhausted -> QuotaExhaustedOverlay(content, spec, interactions)
         is OverlaySpec.Cooldown -> CooldownOverlay(content, spec, interactions)
         OverlaySpec.Forbidden -> ForbiddenOverlay(content.appName)
@@ -457,31 +456,51 @@ private fun KeyboardDigitRow(digits: List<Char>, onDigit: (Char) -> Unit) {
     }
 }
 
-// ------------------------------- 时间已到 -----------------------------------
+// ------------------------------- 时间已到/冷却 -------------------------------
 
 @Composable
-private fun TimeUpOverlay(
+private fun CooldownOverlay(
     content: OverlayContent.Machine,
-    spec: OverlaySpec.TimeUp,
+    spec: OverlaySpec.Cooldown,
     interactions: OverlayInteractions,
 ) {
-    val formKey = "${content.packageName}|${content.appearanceEpoch}|TimeUp:${spec.extensionAvailable}"
-    val maxProtect = if (spec.extensionAvailable) {
-        maxOf(spec.confirmProtectMillis, spec.extensionProtectMillis)
-    } else {
-        spec.confirmProtectMillis
-    }
-    val protection = rememberFormProtection(formKey, maxProtect)
+    val formKey = "${content.packageName}|${content.appearanceEpoch}|Cooldown:${spec.kind}:${spec.extensionAvailable}"
+    val protection = rememberFormProtection(
+        formKey,
+        if (spec.extensionAvailable) spec.extensionProtectMillis else 0L,
+    )
 
     Column(
         modifier = Modifier.fillMaxSize().padding(32.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
     ) {
-        OverlayHeader(content.appName, "时间已到")
+        OverlayHeader(content.appName, "冷却中")
+        Spacer(Modifier.height(12.dp))
+        Text(
+            // 到期路径的冷却浮层兼作"时间已到"提示；共享冷却标注联动来源
+            when {
+                spec.shared -> "同组应用进入冷却联动"
+                spec.kind == CooldownKind.EXPIRY -> "时间已到，冷却中"
+                else -> "本次会话已中途放弃"
+            },
+            fontSize = 16.sp,
+            color = OnOverlayDim,
+            textAlign = TextAlign.Center,
+        )
+        Spacer(Modifier.height(32.dp))
+        // remainingMillis 每秒随状态机快照刷新；保护计时键不含它，故不被重置
+        Text(
+            cooldownCountdownText(content.remainingMillis),
+            fontSize = 30.sp,
+            fontWeight = FontWeight.Bold,
+            color = OnOverlay,
+            textAlign = TextAlign.Center,
+        )
         Spacer(Modifier.height(36.dp))
-        ProtectedButton("确定，返回桌面", protection, spec.confirmProtectMillis) {
-            interactions.onConfirmExit(content.packageName)
+        // 冷却期间主动返回桌面：无保护计时（冷却按墙钟推进，按钮不承载后果），直接可点
+        Button(onClick = { interactions.onConfirmExit(content.packageName) }) {
+            Text("返回桌面", fontSize = 17.sp)
         }
         if (spec.extensionAvailable) {
             Spacer(Modifier.height(18.dp))
@@ -520,59 +539,6 @@ private fun QuotaExhaustedOverlay(
         // 契约：无任何延时，确定后由协调器送回桌面
         ProtectedButton("确定，返回桌面", protection, spec.confirmProtectMillis) {
             interactions.onConfirmExit(content.packageName)
-        }
-    }
-}
-
-// -------------------------------- 冷却中 ------------------------------------
-
-@Composable
-private fun CooldownOverlay(
-    content: OverlayContent.Machine,
-    spec: OverlaySpec.Cooldown,
-    interactions: OverlayInteractions,
-) {
-    val formKey = "${content.packageName}|${content.appearanceEpoch}|Cooldown:${spec.kind}:${spec.extensionAvailable}"
-    val protection = rememberFormProtection(
-        formKey,
-        if (spec.extensionAvailable) spec.extensionProtectMillis else 0L,
-    )
-
-    Column(
-        modifier = Modifier.fillMaxSize().padding(32.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center,
-    ) {
-        OverlayHeader(content.appName, "冷却中")
-        Spacer(Modifier.height(12.dp))
-        Text(
-            when (spec.kind) {
-                CooldownKind.EXPIRY -> "本次会话已结束"
-                CooldownKind.ABANDON -> "本次会话已中途放弃"
-            },
-            fontSize = 16.sp,
-            color = OnOverlayDim,
-            textAlign = TextAlign.Center,
-        )
-        Spacer(Modifier.height(32.dp))
-        // remainingMillis 每秒随状态机快照刷新；保护计时键不含它，故不被重置
-        Text(
-            cooldownCountdownText(content.remainingMillis),
-            fontSize = 30.sp,
-            fontWeight = FontWeight.Bold,
-            color = OnOverlay,
-            textAlign = TextAlign.Center,
-        )
-        Spacer(Modifier.height(36.dp))
-        // 冷却期间主动返回桌面：逃生门不受按钮保护计时约束（与「↻ 刷新」同理），直接可点
-        Button(onClick = { interactions.onConfirmExit(content.packageName) }) {
-            Text("返回桌面", fontSize = 17.sp)
-        }
-        if (spec.extensionAvailable) {
-            Spacer(Modifier.height(18.dp))
-            ProtectedButton("延时使用（限一次）", protection, spec.extensionProtectMillis) {
-                interactions.onExtensionRequested(content.packageName)
-            }
         }
     }
 }
