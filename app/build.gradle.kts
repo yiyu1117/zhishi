@@ -11,18 +11,24 @@ android {
         applicationId = "com.zhishi"
         minSdk = 26
         targetSdk = 36
-        versionCode = 3
+        versionCode = 4
         versionName = "1.1.1"
     }
 
     signingConfigs {
-        create("release") {
-            // 开源侧载项目：keystore 随仓库分发、口令公开（README「发布」节有说明），
-            // 保证任何人都能构建出可安装的 release 包；使用者也可自行替换。
-            storeFile = rootProject.file("keystore/***REMOVED***.keystore")
-            storePassword = "***REMOVED***"
-            keyAlias = "zhishi"
-            keyPassword = "***REMOVED***"
+        // 密钥与口令不进仓库：从本地 keystore.properties 读取（该文件已被 gitignore）。
+        // 缺少该文件时 release 产出未签名包，不影响 assembleDebug。
+        val keystorePropsFile = rootProject.file("keystore.properties")
+        if (keystorePropsFile.exists()) {
+            create("release") {
+                val props = java.util.Properties().apply {
+                    keystorePropsFile.inputStream().use { load(it) }
+                }
+                storeFile = rootProject.file(props.getProperty("storeFile"))
+                storePassword = props.getProperty("storePassword")
+                keyAlias = props.getProperty("keyAlias")
+                keyPassword = props.getProperty("keyPassword")
+            }
         }
     }
 
@@ -30,7 +36,8 @@ android {
         release {
             isMinifyEnabled = true
             isShrinkResources = true
-            signingConfig = signingConfigs.getByName("release")
+            // 无 keystore.properties 时不绑定签名，产出未签名包而非构建失败
+            signingConfig = signingConfigs.findByName("release")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
