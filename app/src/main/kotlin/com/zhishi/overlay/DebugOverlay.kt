@@ -60,6 +60,10 @@ data class MachineDebugEntry(
     /** 活动倒计时剩余（会话/宽限/延时/冷却，随状态语义）；null = 无。 */
     val remainingMillis: Long?,
     val usedTodayMillis: Long,
+    /** 每日限额分钟（v1.2，今日已用的分母展示；0/-1 = 不限或禁用语义）。 */
+    val dailyLimitMinutes: Int = 0,
+    /** 进度清零倒计时（v1.2：暂停试探的保留剩余 / 待选择重开窗口剩余）；null = 无。 */
+    val resetCountdownMillis: Long? = null,
 )
 
 /**
@@ -171,11 +175,14 @@ fun DebugStatesPanel(states: StateFlow<List<MachineDebugEntry>>) {
     ) {
         Text("知时调试", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = DebugOn)
         if (list.isEmpty()) {
-            Text("无状态机", fontSize = 11.sp, color = DebugOnDim)
+            Text("无活动状态机", fontSize = 11.sp, color = DebugOnDim)
         }
         list.forEach { entry ->
             Text(
-                "${entry.appName} · ${stateLabel(entry.state)}${remainingSuffix(entry.remainingMillis)}",
+                "${entry.appName} · ${stateLabel(entry.state)}" +
+                    remainingSuffix(entry.remainingMillis) +
+                    resetSuffix(entry.resetCountdownMillis) +
+                    usedTodaySuffix(entry),
                 fontSize = 11.sp,
                 color = DebugOnDim,
             )
@@ -276,7 +283,7 @@ fun DebugToolsPanel(
 
             Spacer(Modifier.height(10.dp))
             OutlinedButton(onClick = { showLogs = true }, modifier = Modifier.fillMaxWidth()) {
-                Text("查看日志（最近 ${AppLog.entries.value.size} 条）", fontSize = 12.sp)
+                Text("查看日志（最近 ${AppLog.size} 条）", fontSize = 12.sp)
             }
         }
 
@@ -302,7 +309,9 @@ private fun InjectChip(label: String, onClick: () -> Unit) {
 
 @Composable
 private fun LogViewer() {
-    val entries by AppLog.entries.collectAsState()
+    // 订阅条数版本号，内容按需拉取：写日志路径不再逐条拷贝整份列表
+    val version by AppLog.version.collectAsState()
+    val entries = remember(version) { AppLog.snapshot() }
     LazyColumn(
         Modifier
             .fillMaxWidth()
@@ -351,4 +360,20 @@ private fun remainingSuffix(millis: Long?): String {
     if (millis == null) return ""
     val totalSeconds = ceil(millis.coerceAtLeast(0L) / 1000.0).toInt()
     return " ${totalSeconds / 60}:${(totalSeconds % 60).toString().padStart(2, '0')}"
+}
+
+/** 清零倒计时后缀（v1.2）：暂停试探的保留剩余 / 待选择重开窗口剩余。 */
+private fun resetSuffix(millis: Long?): String {
+    if (millis == null) return ""
+    return " ${remainingSuffix(millis).trim()} 后清零"
+}
+
+/** 今日累计使用后缀（v1.2）：有限额时展示「今日已用X/Y分」，否则「今日已用X分」。 */
+private fun usedTodaySuffix(entry: MachineDebugEntry): String {
+    val usedMinutes = entry.usedTodayMillis / 60_000L
+    return if (entry.dailyLimitMinutes > 0) {
+        " 今日已用${usedMinutes}/${entry.dailyLimitMinutes}分"
+    } else {
+        " 今日已用${usedMinutes}分"
+    }
 }

@@ -47,7 +47,7 @@ data class TimeParams(
     /** 自定义时长上限（分钟）。 */
     val customMaxMinutes: Int = 120,
     /** 智能时长联动：开启后到期冷却/宽限期/放弃冷却按比例 × 基数实时计算，关闭用下方固定值。 */
-    val smartTimingEnabled: Boolean = false,
+    val smartTimingEnabled: Boolean = true,
     /** 智能到期冷却比例（%，基数 = 实际前台消耗，含延时）。 */
     val smartExpiryCooldownPercent: Int = 25,
     /** 智能宽限期比例（%，基数 = 开屏所选时长；保底 2 分钟）。 */
@@ -55,7 +55,7 @@ data class TimeParams(
     /** 智能放弃冷却比例（%，基数 = 放弃时实际已用；无保底）。 */
     val smartAbandonCooldownPercent: Int = 17,
     /** 同组共享冷却：本组某应用进入冷却时，按比例分发给组内闲置/待选择的成员。 */
-    val sharedCooldownEnabled: Boolean = false,
+    val sharedCooldownEnabled: Boolean = true,
     /** 共享冷却折算比例（%，接收方冷却 = 发起方冷却 × 比例，向上取整到分钟）。 */
     val sharedCooldownPercent: Int = 67,
     /** 延迟选时试探期时长（分钟）：打开应用后前台累计满该时长弹时间选择浮层。 */

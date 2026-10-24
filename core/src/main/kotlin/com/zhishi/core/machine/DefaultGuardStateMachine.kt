@@ -68,6 +68,16 @@ class DefaultGuardStateMachine(
     /** 试探期退后台的暂停时刻（epoch millis）；null = 未处于中断保留判定中。 */
     private var trialPausedAtMillis: Long? = null
 
+    /**
+     * 试探期满未选时间的重开窗口截止（epoch millis，v1.2）：退出选时浮层时起算保留时长，
+     * 窗口内重开直接弹选时浮层（不再重新计满试探期）；null = 无窗口语义（常规待选择，
+     * 或试探期满的浮层正在展示中——窗口仅在浮层退出后起算，每次退出重新起算）。
+     */
+    private var selectionDeadlineMillis: Long? = null
+
+    /** 当前待选择是否源自试探期满（区别于开屏时间选择：退出浮层后才有重开窗口语义）。 */
+    private var awaitingFromTrialExpiry: Boolean = false
+
     /** 本会话已触发的剩余提醒刻度（每刻度每会话一次）。 */
     private val firedReminderMarks = mutableSetOf<Int>()
 
@@ -145,11 +155,39 @@ class DefaultGuardStateMachine(
             GuardState.RUNNING -> consumeSession(elapsed)
             GuardState.EXTENSION_RUNNING -> consumeExtension(elapsed)
             GuardState.DIRECT_RUNNING -> consumeDirect(elapsed)
-            GuardState.TRIAL_RUNNING -> consumeTrial(elapsed)
+            GuardState.TRIAL_RUNNING -> {
+                // 中断保留自动清零（v1.2）：暂停超保留期即刻转闲置，不再等下次前台进入
+                // 才发现（调试悬浮窗不再挂着过期的试探倒计时）；前台试探不受影响
+                val pausedAt = trialPausedAtMillis
+                if (!inForeground && pausedAt != null &&
+                    now - pausedAt >= config.time.delayedSelectionRetentionMillis
+                ) {
+                    trialRemainingMillis = 0L
+                    trialPausedAtMillis = null
+                    state = GuardState.INACTIVE
+                    emptyList()
+                } else {
+                    consumeTrial(elapsed)
+                }
+            }
             GuardState.GRACE -> if (!inForeground) advanceGrace(elapsed) else emptyList()
             GuardState.EXPIRY_COOLDOWN, GuardState.ABANDON_COOLDOWN -> advanceCooldown(elapsed)
+            GuardState.AWAITING_SELECTION -> advanceSelectionDeadline(now)
             else -> emptyList()
         }
+    }
+
+    /**
+     * 待选择重开窗口推进（v1.2）：试探期满未选时间、退出浮层后，保留期内重开直接弹选时；
+     * 窗口（每次退出重新起算的保留时长）走完即转闲置，下次打开重新计满试探期。
+     */
+    private fun advanceSelectionDeadline(now: Long): List<GuardEffect> {
+        val deadline = selectionDeadlineMillis ?: return emptyList()
+        if (now < deadline) return emptyList()
+        selectionDeadlineMillis = null
+        awaitingFromTrialExpiry = false
+        state = GuardState.INACTIVE
+        return emptyList() // 用户不在应用内（浮层已退），无需浮层效果
     }
 
     // ------------------------------------------------------------------ 前台消耗
@@ -249,6 +287,7 @@ class DefaultGuardStateMachine(
             quotaAfter != null && quotaAfter <= 0L -> enterQuotaExhausted(effects)
             trialRemainingMillis <= 0L -> {
                 state = GuardState.AWAITING_SELECTION
+                awaitingFromTrialExpiry = true // 退出浮层后起算重开窗口（v1.2）
                 effects += show(timeSelectionOverlay())
             }
         }
@@ -282,6 +321,8 @@ class DefaultGuardStateMachine(
     private fun completeCooldown(): List<GuardEffect> {
         cooldownRemainingMillis = 0L
         cooldownShared = false
+        selectionDeadlineMillis = null
+        awaitingFromTrialExpiry = false
         state = GuardState.INACTIVE
         currentOverlay = null
         if (!inForeground) return emptyList()
@@ -296,7 +337,27 @@ class DefaultGuardStateMachine(
         inForeground = true
         return when (state) {
             GuardState.INACTIVE -> enterFromInactive()
-            GuardState.AWAITING_SELECTION -> show(timeSelectionOverlay())
+            GuardState.AWAITING_SELECTION -> {
+                val deadline = selectionDeadlineMillis
+                if (deadline != null) {
+                    if (clock.nowMillis() < deadline) {
+                        // 重开窗口内（v1.2）：直接弹选时浮层，不再重新计满试探期；
+                        // 窗口清除——本次退出后重新起算
+                        selectionDeadlineMillis = null
+                        return show(
+                            timeSelectionOverlay(),
+                            mediaPauseDelayMillis = OPEN_SCREEN_MEDIA_PAUSE_DELAY_MILLIS,
+                        )
+                    }
+                    // 窗口已过（补偿兜底路径）：按入口语义重新计满试探期
+                    selectionDeadlineMillis = null
+                    awaitingFromTrialExpiry = false
+                    state = GuardState.INACTIVE
+                    return enterFromInactive()
+                }
+                // 常规待选择（开屏时间选择 / 试探期满的浮层仍在流程中）：重开即重弹
+                show(timeSelectionOverlay(), mediaPauseDelayMillis = OPEN_SCREEN_MEDIA_PAUSE_DELAY_MILLIS)
+            }
             GuardState.RUNNING, GuardState.DIRECT_RUNNING, GuardState.EXTENSION_RUNNING -> emptyList()
             GuardState.TRIAL_RUNNING -> {
                 // 中断保留：退后台超过保留期试探进度清零，保留期内回来续计
@@ -366,6 +427,11 @@ class DefaultGuardStateMachine(
             GuardState.AWAITING_SELECTION, GuardState.QUOTA_EXHAUSTED, GuardState.BLACKLISTED -> {
                 val had = currentOverlay != null
                 currentOverlay = null
+                // 试探期满的待选择经 Home/返回键离开（v1.2）：与「退出」按钮同语义——
+                // 起算重开窗口，期内重开直接弹选时；否则窗口永不超时、试探永不重计
+                if (state == GuardState.AWAITING_SELECTION && awaitingFromTrialExpiry && selectionDeadlineMillis == null) {
+                    selectionDeadlineMillis = clock.nowMillis() + config.time.delayedSelectionRetentionMillis
+                }
                 if (had) listOf(GuardEffect.HideOverlay) else emptyList()
             }
         }
@@ -392,6 +458,8 @@ class DefaultGuardStateMachine(
         usageToastsSuppressed = false
         usageElapsedMillis = 0L
         pendingCooldownKind = null
+        selectionDeadlineMillis = null
+        awaitingFromTrialExpiry = false
         sessionSelectedMillis = minutes * 60_000L
         sessionRemainingMillis = minOf(sessionSelectedMillis, quota ?: Long.MAX_VALUE)
 
@@ -412,12 +480,18 @@ class DefaultGuardStateMachine(
             listOf(GuardEffect.GoHome, GuardEffect.HideOverlay, GuardEffect.FlushState)
         }
         GuardState.AWAITING_SELECTION -> {
-            // 时间选择浮层的「退出」：未开始会话，无冷却语义；回到闲置，
-            // 下次打开按入口语义重入（延迟选时组由此重新计满试探期）
-            state = GuardState.INACTIVE
             inForeground = false
             currentOverlay = null
-            listOf(GuardEffect.GoHome, GuardEffect.HideOverlay)
+            if (awaitingFromTrialExpiry) {
+                // 试探期满未选时间（v1.2）：不回闲置，起算重开窗口（每次退出重新起算保留
+                // 时长）——窗口内重开直接弹选时浮层；超窗由补偿转闲置，下次打开重新计满
+                selectionDeadlineMillis = clock.nowMillis() + config.time.delayedSelectionRetentionMillis
+                listOf(GuardEffect.GoHome, GuardEffect.HideOverlay)
+            } else {
+                // 时间选择浮层的「退出」：未开始会话，无冷却语义；回到闲置，下次打开按入口语义重入
+                state = GuardState.INACTIVE
+                listOf(GuardEffect.GoHome, GuardEffect.HideOverlay)
+            }
         }
         else -> emptyList()
     }
@@ -456,6 +530,8 @@ class DefaultGuardStateMachine(
     // ------------------------------------------------------------------ 迁移辅助
 
     private fun enterFromInactive(): List<GuardEffect> {
+        selectionDeadlineMillis = null
+        awaitingFromTrialExpiry = false
         val quota = config.remainingQuotaMillis(usedTodayMillis)
         if (quota != null && quota <= 0L && config.dailyLimitMinutes > 0) {
             state = GuardState.QUOTA_EXHAUSTED
@@ -464,7 +540,7 @@ class DefaultGuardStateMachine(
         return when {
             config.mechanismEnabled(Mechanism.TIME_SELECTION) -> {
                 state = GuardState.AWAITING_SELECTION
-                show(timeSelectionOverlay())
+                show(timeSelectionOverlay(), mediaPauseDelayMillis = OPEN_SCREEN_MEDIA_PAUSE_DELAY_MILLIS)
             }
             config.mechanismEnabled(Mechanism.DELAYED_SELECTION) -> {
                 // 延迟选时：进入试探期（前台计时，期满弹时间选择浮层）
@@ -569,9 +645,9 @@ class DefaultGuardStateMachine(
         if (flushState) effects += GuardEffect.FlushState
     }
 
-    private fun show(spec: OverlaySpec): List<GuardEffect> {
+    private fun show(spec: OverlaySpec, mediaPauseDelayMillis: Long = 0L): List<GuardEffect> {
         currentOverlay = spec
-        return listOf(GuardEffect.ShowOverlay(spec))
+        return listOf(GuardEffect.ShowOverlay(spec, mediaPauseDelayMillis))
     }
 
     // ------------------------------------------------------------------ 提醒
@@ -662,6 +738,17 @@ class DefaultGuardStateMachine(
             GuardState.EXPIRY_COOLDOWN, GuardState.ABANDON_COOLDOWN -> cooldownRemainingMillis
             else -> null
         }
+        // 进度清零倒计时（v1.2，调试悬浮窗）：暂停试探的保留剩余 / 待选择重开窗口剩余
+        val now = clock.nowMillis()
+        val resetCountdown = when {
+            state == GuardState.TRIAL_RUNNING && !inForeground -> trialPausedAtMillis?.let { pausedAt ->
+                (config.time.delayedSelectionRetentionMillis - (now - pausedAt)).coerceAtLeast(0L)
+            }
+            state == GuardState.AWAITING_SELECTION -> selectionDeadlineMillis?.let { deadline ->
+                (deadline - now).coerceAtLeast(0L)
+            }
+            else -> null
+        }
         mutableSnapshot.value = GuardSnapshot(
             packageName = packageName,
             state = state,
@@ -669,6 +756,7 @@ class DefaultGuardStateMachine(
             remainingMillis = remaining,
             usedTodayMillis = usedTodayMillis,
             todayRemainingMinutes = todayRemainingMinutes(),
+            resetCountdownMillis = resetCountdown,
         )
     }
 
@@ -728,6 +816,18 @@ class DefaultGuardStateMachine(
                 }
             }
             GuardState.BLACKLISTED -> state = if (config.isForbiddenByQuota()) GuardState.BLACKLISTED else GuardState.INACTIVE
+            GuardState.AWAITING_SELECTION -> {
+                // 重启恢复（v1.2）：带截止的待选择 = 试探期满退出的重开窗口，按剩余续计；
+                // 截止已过（停机期间超窗）直接落闲置，重开按入口语义重新计满试探期
+                val deadline = data.selectionDeadlineMillis
+                if (deadline != null && clock.nowMillis() >= deadline) {
+                    state = GuardState.INACTIVE
+                } else {
+                    state = GuardState.AWAITING_SELECTION
+                    selectionDeadlineMillis = deadline
+                    awaitingFromTrialExpiry = deadline != null
+                }
+            }
             else -> state = data.kind
         }
     }
@@ -763,6 +863,11 @@ class DefaultGuardStateMachine(
             cooldownDeadlineMillis = clock.nowMillis() + cooldownRemainingMillis,
             extensionUsed = extensionUsed,
         )
+        GuardState.AWAITING_SELECTION -> GuardStateData(
+            kind = state,
+            extensionUsed = extensionUsed,
+            selectionDeadlineMillis = selectionDeadlineMillis,
+        )
         else -> GuardStateData(kind = state, extensionUsed = extensionUsed)
     }
 
@@ -779,6 +884,8 @@ class DefaultGuardStateMachine(
                 cooldownShared = false
                 currentOverlay = null
                 inForeground = false
+                selectionDeadlineMillis = null
+                awaitingFromTrialExpiry = false
             }
             GuardState.RUNNING -> {
                 this.state = GuardState.RUNNING
@@ -813,6 +920,8 @@ class DefaultGuardStateMachine(
             GuardState.AWAITING_SELECTION -> {
                 this.state = GuardState.AWAITING_SELECTION
                 currentOverlay = timeSelectionOverlay()
+                selectionDeadlineMillis = null
+                awaitingFromTrialExpiry = false
             }
             else -> Unit
         }
@@ -824,6 +933,9 @@ class DefaultGuardStateMachine(
         if (state != GuardState.INACTIVE && state != GuardState.AWAITING_SELECTION) return
         if (durationMillis <= 0L) return
         lastProcessedMillis = clock.nowMillis()
+        // 接收共享冷却即脱离待选择流程：清重开窗口语义
+        selectionDeadlineMillis = null
+        awaitingFromTrialExpiry = false
         state = if (kind == CooldownKind.EXPIRY) GuardState.EXPIRY_COOLDOWN else GuardState.ABANDON_COOLDOWN
         cooldownKind = kind
         cooldownRemainingMillis = durationMillis
@@ -848,6 +960,8 @@ class DefaultGuardStateMachine(
                 extensionRemainingMillis = 0L
                 trialRemainingMillis = 0L
                 trialPausedAtMillis = null
+                selectionDeadlineMillis = null
+                awaitingFromTrialExpiry = false
                 cooldownRemainingMillis = 0L
                 cooldownShared = false
                 pendingCooldownKind = null
@@ -885,6 +999,42 @@ class DefaultGuardStateMachine(
                 GuardState.EXPIRY_COOLDOWN, GuardState.ABANDON_COOLDOWN -> cooldownOverlay()
                 else -> currentOverlay
             }
+        }
+        publishSnapshot()
+    }
+
+    /**
+     * 配置保存后的运行状态重置（v1.2）：会话/试探/冷却/宽限/待选择窗口全清，回到闲置；
+     * 当日累计与额度禁用语义保留（重置后仍超限则落额度用尽，次日零点解除）。
+     * 与 [onConfigUpdated] 的区别：后者只换参数不清状态（进行中的会话不打断），
+     * 本方法由协调器在分组配置保存时调用——用户要求更改立刻生效、不留状态残留。
+     */
+    override fun resetRuntimeState() {
+        lastProcessedMillis = clock.nowMillis()
+        sessionRemainingMillis = 0L
+        sessionSelectedMillis = 0L
+        graceRemainingMillis = 0L
+        extensionRemainingMillis = 0L
+        extensionUsed = false
+        extensionPrewarnFired = false
+        trialRemainingMillis = 0L
+        trialPausedAtMillis = null
+        selectionDeadlineMillis = null
+        awaitingFromTrialExpiry = false
+        cooldownRemainingMillis = 0L
+        cooldownShared = false
+        pendingCooldownKind = null
+        pendingCooldownRemainingMillis = 0L
+        usageElapsedMillis = 0L
+        firedReminderMarks.clear()
+        deferredUsageToasts.clear()
+        currentOverlay = null
+        inForeground = false
+        state = when {
+            config.isForbiddenByQuota() -> GuardState.BLACKLISTED
+            config.dailyLimitMinutes > 0 && config.remainingQuotaMillis(usedTodayMillis) == 0L ->
+                GuardState.QUOTA_EXHAUSTED
+            else -> GuardState.INACTIVE
         }
         publishSnapshot()
     }

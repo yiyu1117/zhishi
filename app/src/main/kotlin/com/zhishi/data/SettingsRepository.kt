@@ -59,6 +59,13 @@ class SettingsRepository(private val appContext: Context) {
     /** 调试工具悬浮窗（重置计时/注入状态/查看日志），默认关。 */
     val debugToolsEnabled: Flow<Boolean> = dataStore.data.map { it[DEBUG_TOOLS_KEY] ?: false }
 
+    /**
+     * 常驻通知显示剩余时长（v1.2）：开启后常驻通知随会话/延时展示当前应用剩余时间；
+     * 两种检测模式均可开启（无障碍模式下会额外启动一条常驻通知服务），默认关。
+     */
+    val notificationUsageVisible: Flow<Boolean> =
+        dataStore.data.map { it[NOTIFICATION_USAGE_VISIBLE_KEY] ?: false }
+
     val settings: Flow<SettingsSnapshot> = combine(
         defaultTimeParams,
         newGroupDailyLimitMinutes,
@@ -120,6 +127,28 @@ class SettingsRepository(private val appContext: Context) {
         dataStore.edit { it[DEBUG_TOOLS_KEY] = enabled }
     }
 
+    suspend fun setNotificationUsageVisible(enabled: Boolean) {
+        dataStore.edit { it[NOTIFICATION_USAGE_VISIBLE_KEY] = enabled }
+    }
+
+    /**
+     * v1.2 一次性迁移：全局默认参数的「智能时长联动」「同组共享冷却」置开——
+     * 生产默认值已改为开，但已落盘的旧值不会自行跟随；仅执行一次（标记位防重跑），
+     * 此后用户手动改回的值不会被再次覆盖。由协调器启动时调用。
+     */
+    suspend fun migrateV12DefaultSwitchesIfNeeded() {
+        dataStore.edit { prefs ->
+            if (prefs[MIGRATED_V12_KEY] == true) return@edit
+            prefs[TIME_PARAMS_KEY] = TimeParamsFormat.encode(
+                decodeTimeParams(prefs).copy(
+                    smartTimingEnabled = true,
+                    sharedCooldownEnabled = true,
+                ),
+            )
+            prefs[MIGRATED_V12_KEY] = true
+        }
+    }
+
     // region 解码 / 编码
 
     private fun decodeLock(prefs: Preferences): DisciplineLockConfig = DisciplineLockConfig(
@@ -149,5 +178,7 @@ class SettingsRepository(private val appContext: Context) {
         val KEEP_ALIVE_DISMISSED_KEY = booleanPreferencesKey("guide.keepAlive.dismissed")
         val DEBUG_MODE_KEY = booleanPreferencesKey("debug.overlay.enabled")
         val DEBUG_TOOLS_KEY = booleanPreferencesKey("debug.tools.enabled")
+        val NOTIFICATION_USAGE_VISIBLE_KEY = booleanPreferencesKey("notification.usageVisible")
+        val MIGRATED_V12_KEY = booleanPreferencesKey("migrated.v12DefaultSwitches")
     }
 }

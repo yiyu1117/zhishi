@@ -212,6 +212,8 @@ internal fun GroupConfigEditSection(
         }
 
         GroupSubHeader("宽限期与冷却")
+        // v1.2：智能模式下三行主行直接改百分比（这就是智能模式实际生效的参数）；
+        // 关闭智能时主行改固定分钟值（兜底）
         GroupSettingRow(
             "宽限期",
             if (time.smartTimingEnabled) {
@@ -222,12 +224,22 @@ internal fun GroupConfigEditSection(
             enabled = writable,
             description = "退到后台后计时暂停、会话不重置的最长时长；超过即判中途放弃。",
         ) {
-            editRequest = GroupEditRequest(
-                title = "宽限期（分钟）",
-                initial = (time.gracePeriodMillis / 60_000).toInt(),
-                min = 1, max = 1440, unit = "分钟",
-            ) { value ->
-                onUpdate(config.copy(time = time.copy(gracePeriodMillis = value * 60_000L)))
+            editRequest = if (time.smartTimingEnabled) {
+                GroupEditRequest(
+                    title = "宽限期比例（%）",
+                    initial = time.smartGracePercent,
+                    min = 0, max = 100, unit = "%",
+                ) { value ->
+                    onUpdate(config.copy(time = time.copy(smartGracePercent = value)))
+                }
+            } else {
+                GroupEditRequest(
+                    title = "宽限期（分钟）",
+                    initial = (time.gracePeriodMillis / 60_000).toInt(),
+                    min = 1, max = 1440, unit = "分钟",
+                ) { value ->
+                    onUpdate(config.copy(time = time.copy(gracePeriodMillis = value * 60_000L)))
+                }
             }
         }
         GroupSettingRow(
@@ -240,12 +252,22 @@ internal fun GroupConfigEditSection(
             enabled = writable,
             description = "中途放弃（宽限期耗尽仍未回来）后的禁入时长，默认短于到期冷却。",
         ) {
-            editRequest = GroupEditRequest(
-                title = "放弃冷却（分钟）",
-                initial = (time.abandonCooldownMillis / 60_000).toInt(),
-                min = 1, max = 1440, unit = "分钟",
-            ) { value ->
-                onUpdate(config.copy(time = time.copy(abandonCooldownMillis = value * 60_000L)))
+            editRequest = if (time.smartTimingEnabled) {
+                GroupEditRequest(
+                    title = "放弃冷却比例（%）",
+                    initial = time.smartAbandonCooldownPercent,
+                    min = 0, max = 100, unit = "%",
+                ) { value ->
+                    onUpdate(config.copy(time = time.copy(smartAbandonCooldownPercent = value)))
+                }
+            } else {
+                GroupEditRequest(
+                    title = "放弃冷却（分钟）",
+                    initial = (time.abandonCooldownMillis / 60_000).toInt(),
+                    min = 1, max = 1440, unit = "分钟",
+                ) { value ->
+                    onUpdate(config.copy(time = time.copy(abandonCooldownMillis = value * 60_000L)))
+                }
             }
         }
         GroupSettingRow(
@@ -258,12 +280,22 @@ internal fun GroupConfigEditSection(
             enabled = writable,
             description = "时间用尽后的禁入时长；倒计时按墙钟推进，走完且你仍停留时原地回时间选择。",
         ) {
-            editRequest = GroupEditRequest(
-                title = "到期冷却（分钟）",
-                initial = (time.expiryCooldownMillis / 60_000).toInt(),
-                min = 1, max = 1440, unit = "分钟",
-            ) { value ->
-                onUpdate(config.copy(time = time.copy(expiryCooldownMillis = value * 60_000L)))
+            editRequest = if (time.smartTimingEnabled) {
+                GroupEditRequest(
+                    title = "到期冷却比例（%）",
+                    initial = time.smartExpiryCooldownPercent,
+                    min = 0, max = 100, unit = "%",
+                ) { value ->
+                    onUpdate(config.copy(time = time.copy(smartExpiryCooldownPercent = value)))
+                }
+            } else {
+                GroupEditRequest(
+                    title = "到期冷却（分钟）",
+                    initial = (time.expiryCooldownMillis / 60_000).toInt(),
+                    min = 1, max = 1440, unit = "分钟",
+                ) { value ->
+                    onUpdate(config.copy(time = time.copy(expiryCooldownMillis = value * 60_000L)))
+                }
             }
         }
 
@@ -274,38 +306,10 @@ internal fun GroupConfigEditSection(
             checked = time.smartTimingEnabled,
             enabled = writable,
             description = "开启后到期冷却 / 宽限期 / 放弃冷却分别按比例 × 基数实时计算" +
-                "（结果不足 1 分钟保留秒级，达到 1 分钟向上取整；宽限保底 2 分钟）。",
+                "（结果不足 1 分钟保留秒级，达到 1 分钟向上取整；宽限保底 2 分钟）；" +
+                "开启时在上方三行中直接修改比例。",
         ) { on ->
             scope.launch { onUpdate(config.copy(time = time.copy(smartTimingEnabled = on))) }
-        }
-        if (time.smartTimingEnabled) {
-            GroupSettingRow("到期冷却比例", "${time.smartExpiryCooldownPercent}%", enabled = writable) {
-                editRequest = GroupEditRequest(
-                    title = "到期冷却比例（%）",
-                    initial = time.smartExpiryCooldownPercent,
-                    min = 0, max = 100, unit = "%",
-                ) { value ->
-                    onUpdate(config.copy(time = time.copy(smartExpiryCooldownPercent = value)))
-                }
-            }
-            GroupSettingRow("宽限期比例", "${time.smartGracePercent}%", enabled = writable) {
-                editRequest = GroupEditRequest(
-                    title = "宽限期比例（%）",
-                    initial = time.smartGracePercent,
-                    min = 0, max = 100, unit = "%",
-                ) { value ->
-                    onUpdate(config.copy(time = time.copy(smartGracePercent = value)))
-                }
-            }
-            GroupSettingRow("放弃冷却比例", "${time.smartAbandonCooldownPercent}%", enabled = writable) {
-                editRequest = GroupEditRequest(
-                    title = "放弃冷却比例（%）",
-                    initial = time.smartAbandonCooldownPercent,
-                    min = 0, max = 100, unit = "%",
-                ) { value ->
-                    onUpdate(config.copy(time = time.copy(smartAbandonCooldownPercent = value)))
-                }
-            }
         }
 
         GroupSubHeader("同组共享冷却")

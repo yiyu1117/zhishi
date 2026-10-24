@@ -71,6 +71,7 @@ internal fun SettingsScreen(onBack: () -> Unit) {
     val newGroupLimit by repo.newGroupDailyLimitMinutes.collectAsStateWithLifecycle(initialValue = null)
     val debugMode by repo.debugMode.collectAsStateWithLifecycle(initialValue = false)
     val debugTools by repo.debugToolsEnabled.collectAsStateWithLifecycle(initialValue = false)
+    val notificationUsage by repo.notificationUsageVisible.collectAsStateWithLifecycle(initialValue = false)
     val context = LocalContext.current
 
     var editRequest by remember { mutableStateOf<NumberEditRequest?>(null) }
@@ -204,6 +205,18 @@ internal fun SettingsScreen(onBack: () -> Unit) {
                     Spacer(Modifier.height(8.dp))
                     PollingGuideCard()
                 }
+                Spacer(Modifier.height(8.dp))
+                // v1.2：常驻通知展示剩余时长（两种模式均可开启，默认关）
+                SettingToggleRow(
+                    "常驻通知显示剩余时长",
+                    if (notificationUsage) "已开启" else "已关闭",
+                    checked = notificationUsage,
+                    enabled = !lock.locked,
+                    description = "开启后常驻通知随会话/延时显示当前应用剩余时间；" +
+                        "无障碍模式下会额外启动一条常驻通知服务（附带保活收益）。",
+                ) { on ->
+                    scope.launch { repo.setNotificationUsageVisible(on) }
+                }
             }
             // endregion
 
@@ -290,14 +303,22 @@ internal fun SettingsScreen(onBack: () -> Unit) {
                 }
 
                 SectionSubHeader("宽限期与冷却")
+                // v1.2：智能模式下三行主行直接改百分比（智能模式实际生效的参数）；
+                // 关闭智能时主行改固定分钟值（兜底）
                 SettingRow(
                     "宽限期",
                     if (tp.smartTimingEnabled) "智能（${tp.smartGracePercent}% × 所选时长，保底 2 分）" else "${tp.gracePeriodMillis / 60_000} 分钟",
                     enabled = writable,
                     description = "退到后台后计时暂停、会话不重置的最长时长；超过即判中途放弃。",
                 ) {
-                    editRequest = minutesRequest("宽限期（分钟）", tp.gracePeriodMillis) { value ->
-                        repo.updateDefaultTimeParams { it.copy(gracePeriodMillis = value * 60_000L) }
+                    editRequest = if (tp.smartTimingEnabled) {
+                        NumberEditRequest("宽限期比例（%）", tp.smartGracePercent, 0, 100, "%") { value ->
+                            repo.updateDefaultTimeParams { it.copy(smartGracePercent = value) }
+                        }
+                    } else {
+                        minutesRequest("宽限期（分钟）", tp.gracePeriodMillis) { value ->
+                            repo.updateDefaultTimeParams { it.copy(gracePeriodMillis = value * 60_000L) }
+                        }
                     }
                 }
                 SettingRow(
@@ -306,8 +327,14 @@ internal fun SettingsScreen(onBack: () -> Unit) {
                     enabled = writable,
                     description = "中途放弃（宽限期耗尽仍未回来）后的禁入时长，默认短于到期冷却。",
                 ) {
-                    editRequest = minutesRequest("放弃冷却（分钟）", tp.abandonCooldownMillis) { value ->
-                        repo.updateDefaultTimeParams { it.copy(abandonCooldownMillis = value * 60_000L) }
+                    editRequest = if (tp.smartTimingEnabled) {
+                        NumberEditRequest("放弃冷却比例（%）", tp.smartAbandonCooldownPercent, 0, 100, "%") { value ->
+                            repo.updateDefaultTimeParams { it.copy(smartAbandonCooldownPercent = value) }
+                        }
+                    } else {
+                        minutesRequest("放弃冷却（分钟）", tp.abandonCooldownMillis) { value ->
+                            repo.updateDefaultTimeParams { it.copy(abandonCooldownMillis = value * 60_000L) }
+                        }
                     }
                 }
                 SettingRow(
@@ -316,8 +343,14 @@ internal fun SettingsScreen(onBack: () -> Unit) {
                     enabled = writable,
                     description = "时间用尽后的禁入时长；倒计时按墙钟推进，走完且你仍停留时原地回时间选择。",
                 ) {
-                    editRequest = minutesRequest("到期冷却（分钟）", tp.expiryCooldownMillis) { value ->
-                        repo.updateDefaultTimeParams { it.copy(expiryCooldownMillis = value * 60_000L) }
+                    editRequest = if (tp.smartTimingEnabled) {
+                        NumberEditRequest("到期冷却比例（%）", tp.smartExpiryCooldownPercent, 0, 100, "%") { value ->
+                            repo.updateDefaultTimeParams { it.copy(smartExpiryCooldownPercent = value) }
+                        }
+                    } else {
+                        minutesRequest("到期冷却（分钟）", tp.expiryCooldownMillis) { value ->
+                            repo.updateDefaultTimeParams { it.copy(expiryCooldownMillis = value * 60_000L) }
+                        }
                     }
                 }
 
@@ -328,26 +361,10 @@ internal fun SettingsScreen(onBack: () -> Unit) {
                     checked = tp.smartTimingEnabled,
                     enabled = writable,
                     description = "开启后到期冷却 / 宽限期 / 放弃冷却分别按比例 × 基数实时计算" +
-                        "（结果不足 1 分钟保留秒级，达到 1 分钟向上取整；宽限保底 2 分钟）。",
+                        "（结果不足 1 分钟保留秒级，达到 1 分钟向上取整；宽限保底 2 分钟）；" +
+                        "开启时在上方三行中直接修改比例。",
                 ) { on ->
                     scope.launch { repo.updateDefaultTimeParams { it.copy(smartTimingEnabled = on) } }
-                }
-                if (tp.smartTimingEnabled) {
-                    SettingRow("到期冷却比例", "${tp.smartExpiryCooldownPercent}%", enabled = writable) {
-                        editRequest = NumberEditRequest("到期冷却比例（%）", tp.smartExpiryCooldownPercent, 0, 100, "%") { value ->
-                            repo.updateDefaultTimeParams { it.copy(smartExpiryCooldownPercent = value) }
-                        }
-                    }
-                    SettingRow("宽限期比例", "${tp.smartGracePercent}%", enabled = writable) {
-                        editRequest = NumberEditRequest("宽限期比例（%）", tp.smartGracePercent, 0, 100, "%") { value ->
-                            repo.updateDefaultTimeParams { it.copy(smartGracePercent = value) }
-                        }
-                    }
-                    SettingRow("放弃冷却比例", "${tp.smartAbandonCooldownPercent}%", enabled = writable) {
-                        editRequest = NumberEditRequest("放弃冷却比例（%）", tp.smartAbandonCooldownPercent, 0, 100, "%") { value ->
-                            repo.updateDefaultTimeParams { it.copy(smartAbandonCooldownPercent = value) }
-                        }
-                    }
                 }
 
                 SectionSubHeader("同组共享冷却")
@@ -436,8 +453,8 @@ internal fun SettingsScreen(onBack: () -> Unit) {
             }
             // endregion
 
-            // region 调试模式（置于最底，排查用）
-            SettingsSection(title = "调试模式") {
+            // region 调试模式（置于最底，排查用；v1.2 起默认折叠）
+            CollapsibleSettingsSection(title = "调试模式", initiallyExpanded = false) {
                 Row(
                     Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
@@ -558,6 +575,37 @@ private fun SettingsSection(title: String, content: @Composable ColumnScope.() -
         ) {
             Text(title, style = MaterialTheme.typography.titleMedium)
             content()
+        }
+    }
+}
+
+/** 可折叠的设置节（v1.2）：标题行点击展开/收起，[initiallyExpanded] 控制默认态。 */
+@Composable
+private fun CollapsibleSettingsSection(
+    title: String,
+    initiallyExpanded: Boolean,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    var expanded by remember { mutableStateOf(initiallyExpanded) }
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            Modifier.fillMaxWidth().padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clickable { expanded = !expanded },
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(title, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+                Text(
+                    if (expanded) "▾" else "▸",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            if (expanded) content()
         }
     }
 }

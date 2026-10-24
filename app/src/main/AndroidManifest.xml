@@ -73,6 +73,16 @@
                 android:value="防沉迷守护：以 UsageStats 轮询感知前台应用切换并施加拦截浮层，需常驻保活以防守护被系统休眠中断" />
         </service>
 
+        <!-- 常驻通知服务（v1.2）：「常驻通知显示剩余时长」设置开启时承载通知，两种检测模式通用。 -->
+        <service
+            android:name=".detect.GuardNotificationService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="防沉迷守护：按用户设置在常驻通知中展示当前使用应用的剩余时长" />
+        </service>
+
         <!-- 开机自启：BOOT_COMPLETED 为系统保护广播（仅系统可发送），exported=true 不会被第三方滥用 -->
         <receiver
             android:name=".detect.BootReceiver"

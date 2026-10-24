@@ -30,6 +30,7 @@ import com.zhishi.data.SettingsRepository
 import com.zhishi.data.UsageLedger
 import com.zhishi.detect.ForegroundApp
 import com.zhishi.detect.ForegroundMonitor
+import com.zhishi.detect.GuardNotificationService
 import com.zhishi.detect.PollingForegroundDetector
 import com.zhishi.detect.PollingForegroundService
 import com.zhishi.detect.ZhishiAccessibilityService
@@ -86,12 +87,33 @@ class GuardCoordinator(
     /** 拦截浮层可见期间的媒体静音器：持有音频焦点，被拦应用暂停出声。 */
     private val mediaSilencer = MediaSilencer(appContext)
 
+    /**
+     * 最近一次 ShowOverlay 效果声明的媒体暂停延迟（毫秒）：浮层窗口 attach 回调内消费。
+     * 协调器主线程串行执行（translate → show → attach 回调），无竞态。
+     */
+    private var pendingMediaPauseDelayMillis = 0L
+
+    /** 延迟媒体暂停的任务：浮层在延迟期内被关闭则取消（如用户立刻选定了时长）。 */
+    private var mediaAcquireJob: Job? = null
+
     init {
-        // 浮层可见 ⇔ 持有音频焦点：开屏即播的媒体应用被暂停；对着浮层按返回刷出的
+        // 浮层可见 ⇔ 持有音频焦点：被拦应用出声即被暂停；对着浮层按返回刷出的
         // 新视频重新请求焦点时被立即夺回，杜绝"没画面但有声音"。
+        // v1.2：开屏选时类拦截的暂停延迟数秒再发（应用开屏尚在加载数据、媒体会话
+        // 未就绪，立即派发落空），延迟期内浮层被关闭则取消；其余拦截保持立即暂停。
         overlayManager.onVisibilityChanged = { _, visible ->
+            mediaAcquireJob?.cancel()
+            mediaAcquireJob = null
             if (visible) {
-                mediaSilencer.acquire()
+                val delayMillis = pendingMediaPauseDelayMillis
+                pendingMediaPauseDelayMillis = 0L
+                mediaAcquireJob = scope.launch {
+                    if (delayMillis > 0L) {
+                        AppLog.d(TAG, "媒体暂停延迟 ${delayMillis}ms（开屏等媒体会话就绪）")
+                        delay(delayMillis)
+                    }
+                    mediaSilencer.acquire()
+                }
                 // 同类型浮窗按添加顺序叠放：拦截浮层弹出后把调试窗顶回最前，避免被盖住
                 debugStatesWindow.reorderToFront()
                 debugToolsWindow.reorderToFront()
@@ -126,10 +148,13 @@ class GuardCoordinator(
     private val _notificationUsage = MutableStateFlow<NotificationUsage?>(null)
     val notificationUsage: StateFlow<NotificationUsage?> = _notificationUsage.asStateFlow()
 
-    /** 调试悬浮窗数据流：全部状态机的实时状态（含闲置），设置页「调试模式」开关控制显隐。 */
+    /** 调试悬浮窗数据流：活动状态机的实时状态（闲置不显示），设置页「调试模式」开关控制显隐。 */
     private val _debugStates = MutableStateFlow<List<MachineDebugEntry>>(emptyList())
     val debugStates: StateFlow<List<MachineDebugEntry>> = _debugStates.asStateFlow()
     private val debugEntries = LinkedHashMap<String, MachineDebugEntry>()
+
+    /** 调试面板防抖在途标记：风暴期内的多次 publishDebugStates 合并为一次末值重建。 */
+    private var debugPublishScheduled = false
 
     /** 状态调试小悬浮窗（只读，屏幕左上；不可触摸、不影响操作）。 */
     private val debugStatesWindow = DebugOverlayWindow(
@@ -179,9 +204,12 @@ class GuardCoordinator(
             scope.launch { settings.detectionMode.collect { switchMode(it) } },
             scope.launch { settings.debugMode.collect { debugStatesWindow.setVisible(it) } },
             scope.launch { settings.debugToolsEnabled.collect { debugToolsWindow.setVisible(it) } },
+            scope.launch { settings.notificationUsageVisible.collect { syncNotificationService(it) } },
         )
         // 先载入记账与恢复数据，再对账创建状态机
         scope.launch {
+            // v1.2 一次性迁移：全局默认参数的智能时长联动/同组共享冷却置开（新分组默认启用）
+            settings.migrateV12DefaultSwitchesIfNeeded()
             val day = todayIso()
             // 跨日恢复：旧自然日落盘的 QUOTA_EXHAUSTED 等同 DayChanged 重置（丢弃，按 INACTIVE 重建）——
             // 启动时 currentDay 已是今天，DayChanged 不会再触发，不丢弃会把用户按昨日额度禁用一整天。
@@ -216,8 +244,13 @@ class GuardCoordinator(
         visibleMachinePkgs = emptySet()
         debugEntries.clear()
         _debugStates.value = emptyList()
+        debugPublishScheduled = false
         debugStatesWindow.setVisible(false)
         debugToolsWindow.setVisible(false)
+        appContext.stopService(Intent(appContext, GuardNotificationService::class.java))
+        mediaAcquireJob?.cancel()
+        mediaAcquireJob = null
+        pendingMediaPauseDelayMillis = 0L
         // 复位记账/恢复引导状态：再次 start() 时重新载入，避免沿用本进程上个会话的残留缓存
         bootstrapped = false
         restoredStates = emptyMap()
@@ -293,7 +326,11 @@ class GuardCoordinator(
         val previous = visibleMachinePkgs
         visibleMachinePkgs = withMachines
         for (pkg in withMachines) {
-            if (pkg in foregroundMachines) continue
+            if (pkg in foregroundMachines) {
+                // 窗口重新出现：撤销在途退后台确认（窗口列表瞬态残缺误报的回声）
+                pendingLeaves.remove(pkg)?.cancel()
+                continue
+            }
             Log.d(TAG, "dispatch ForegroundEntered (visible window) pkg=$pkg")
             AppLog.d(TAG, "前台进入（可见窗口）pkg=$pkg")
             machines[pkg]?.let {
@@ -302,12 +339,16 @@ class GuardCoordinator(
             }
         }
         for (pkg in previous) {
-            // 窗口消失是退后台的直接证据；但焦点仍报告为该包时不信任扫描误报
-            //（窗口列表瞬态残缺会把焦点应用误判为消失，滞留宽限被耗尽成"中途放弃"）
-            if (pkg !in withMachines && pkg in foregroundMachines && pkg != lastForeground) {
-                Log.d(TAG, "dispatch Backgrounded (window gone) pkg=$pkg")
-                AppLog.d(TAG, "退后台（窗口消失）pkg=$pkg")
-                dispatchLeave(pkg, force = true)
+            if (pkg !in withMachines && pkg in foregroundMachines) {
+                if (pendingLeaves.containsKey(pkg)) continue // 已在挂起确认中（复扫刷新不重入）
+                // 窗口消失是退后台的直接证据，但存在两类干扰：焦点切换事件被焦点校验丢弃
+                //（应用 finish 退桌面时桌面获焦事件先于焦点切换到达，v1.2 前机器滞留前台
+                // 计时照走）；窗口列表瞬态残缺把仍在使用的应用误判为消失（直接放行会滞留
+                // 宽限被耗尽成"中途放弃"）。两条路都走挂起确认：UsageStats 证据或延迟复扫
+                // （焦点他移且窗口确已消失）裁决，真实切换代价是判定晚 1–2 秒。
+                Log.d(TAG, "leave pending (window gone) pkg=$pkg")
+                AppLog.d(TAG, "退后台挂起确认中（窗口消失）pkg=$pkg")
+                pendLeave(pkg)
             }
         }
         refreshNotificationUsage()
@@ -318,6 +359,11 @@ class GuardCoordinator(
      * 真实切换；仅见新应用事件而原应用始终无暂停记录（被强杀/崩溃）超过安全窗后强制放行；
      * 两者皆无（音量条等瞬态窗口）则视为误报丢弃，浮层与计时如常。真实切换的代价是
      * 退后台判定晚约 1–2 秒，会话/冷却误差可忽略。
+     *
+     * v1.2 复扫兜底：UsageStats 证据缺失（未授权/落账延迟/双击返回退出后焦点事件被
+     * 焦点校验丢弃）时，延迟复扫窗口裁决——焦点已他移且该应用窗口确已消失即判真离开；
+     * 焦点仍在本应用则视为扫描残缺误报，撤销挂起。复扫结果照常经监视器刷新可见集合，
+     * 故随后按"窗口仍可见抑制"路径放行即可。
      */
     private fun pendLeave(pkg: String) {
         Log.d(TAG, "leave pending (await usage evidence) pkg=$pkg")
@@ -336,9 +382,29 @@ class GuardCoordinator(
                 if (evidence.confirmed) {
                     Log.d(TAG, "leave confirmed pkg=$pkg")
                     AppLog.d(TAG, "退后台证实（UsageStats）pkg=$pkg")
-                    pendingLeaves.remove(pkg)
                     dispatchLeave(pkg, force = false)
                     return@launch
+                }
+                if (waited >= LEAVE_RESCAN_AFTER_MILLIS &&
+                    (waited / LEAVE_CONFIRM_STEP_MILLIS) % LEAVE_RESCAN_EVERY_STEPS == 0L
+                ) {
+                    val scan = monitor.currentDetector()?.rescan()
+                    if (scan != null && scan.focusedPackage != null) {
+                        if (scan.focusedPackage == pkg) {
+                            // 焦点仍在本应用：窗口列表残缺误报，撤销挂起（用户还在应用内）
+                            Log.d(TAG, "leave dropped (rescan still focused) pkg=$pkg")
+                            AppLog.d(TAG, "退后台丢弃（复扫焦点仍在）pkg=$pkg")
+                            pendingLeaves.remove(pkg)
+                            return@launch
+                        }
+                        if (pkg !in scan.visiblePackages) {
+                            Log.d(TAG, "leave confirmed (rescan: focused elsewhere, window gone) pkg=$pkg")
+                            AppLog.d(TAG, "退后台证实（复扫：焦点他移且窗口消失）pkg=$pkg")
+                            dispatchLeave(pkg, force = false)
+                            return@launch
+                        }
+                        // 焦点他移但窗口仍可见（分屏等）：继续等 UsageStats 证据/安全窗
+                    }
                 }
             }
             pendingLeaves.remove(pkg)
@@ -428,8 +494,11 @@ class GuardCoordinator(
     private fun translate(packageName: String, effects: List<GuardEffect>) {
         for (effect in effects) {
             when (effect) {
-                is GuardEffect.ShowOverlay ->
+                is GuardEffect.ShowOverlay -> {
+                    // 状态机声明的媒体暂停延迟（仅开屏选时类拦截 > 0）：窗口 attach 回调内消费
+                    pendingMediaPauseDelayMillis = effect.mediaPauseDelayMillis
                     overlayManager.show(packageName, catalog.appName(packageName), effect.spec)
+                }
                 GuardEffect.HideOverlay -> overlayManager.hide(packageName)
                 is GuardEffect.ShowToast -> showToast(effect.toast)
                 GuardEffect.GoHome -> {
@@ -489,6 +558,24 @@ class GuardCoordinator(
         }
         AppLog.i(TAG, "提醒：$message")
         Toast.makeText(appContext, message, Toast.LENGTH_SHORT).show()
+    }
+
+    // endregion
+
+    // region 常驻通知服务（v1.2，两种检测模式通用）
+
+    /**
+     * 「常驻通知显示剩余时长」开关接线：开启且协调器运行中拉起通知服务（无障碍模式下
+     * 额外承载一条常驻通知；轮询模式由守护服务自身承担，此服务作为统一出口也无妨）；
+     * 关闭即停。通知内容随 [notificationUsage] 刷新（服务内收集）。
+     */
+    private fun syncNotificationService(visible: Boolean) {
+        val intent = Intent(appContext, GuardNotificationService::class.java)
+        if (visible && running) {
+            ContextCompat.startForegroundService(appContext, intent)
+        } else {
+            appContext.stopService(intent)
+        }
     }
 
     // endregion
@@ -584,15 +671,23 @@ class GuardCoordinator(
         (machines.keys.toSet() - packages).forEach(::removeMachine)
     }
 
-    /** 配置级更新回调（repository 暴露）：不换组时调用机器 onConfigUpdated，不清状态。 */
+    /**
+     * 配置级更新回调（repository 暴露）：先热更新配置，再重置该组全部成员的运行状态
+     * （v1.2：会话/试探/冷却/宽限全清、当日累计保留）——防止状态残留（如仍在计时的
+     * 过期试探）让配置更改无法立刻生效。与 groupSnapshot→onRulesChanged 热更新路径
+     * 的次序无关紧要：两者都以"最新配置生效、状态重置"收敛，此处无条件重置保证确定性。
+     */
     private fun onConfigUpdate(update: GroupConfigUpdate) {
         val snapshot = rulesSnapshot ?: return
         for (pkg in membersOf(update.groupId, snapshot.assignments)) {
             val machine = machines[pkg] ?: continue
-            if (machineConfigs[pkg] != update.config) {
-                machine.onConfigUpdated(update.config)
-                machineConfigs[pkg] = update.config
-            }
+            machineConfigs[pkg] = update.config
+            machine.onConfigUpdated(update.config)
+            AppLog.d(TAG, "配置更新重置状态 pkg=$pkg")
+            pendingLeaves.remove(pkg)?.cancel()
+            overlayManager.hide(pkg)
+            machine.resetRuntimeState()
+            flush(pkg) // 重置后的状态立即落盘（进程重启不复活旧会话）
         }
     }
 
@@ -662,22 +757,31 @@ class GuardCoordinator(
             state = snapshot.state,
             remainingMillis = snapshot.remainingMillis,
             usedTodayMillis = snapshot.usedTodayMillis,
+            dailyLimitMinutes = machineConfigs[pkg]?.dailyLimitMinutes ?: 0,
+            resetCountdownMillis = snapshot.resetCountdownMillis,
         )
         publishDebugStates()
     }
 
     /**
-     * 发布调试数据：活动状态在前（剩余升序），闲置在后，应用名次序稳定。
-     * 逐条比对去重：配置热更新会让组内全部机器重发快照，但调试条目内容未变，
-     * 直接赋值会以 O(N²) 重建整面板（设置保存卡顿的元凶之一）。
+     * 发布调试数据：活动状态在前（剩余升序），应用名次序稳定；闲置行不显示
+     * （v1.2：守护应用一多闲置行铺满面板，且试探过期转闲置后行直接消失）。
+     * 快照风暴合并：配置热更新会让组内全部机器重发快照，逐条重建面板是 O(N²)
+     * （设置保存卡顿的元凶之一）——防抖窗口内的多次发布合并为一次末值重建。
      */
     private fun publishDebugStates() {
-        val next = debugEntries.values
-            .sortedWith(
-                compareBy({ it.state == GuardState.INACTIVE }, { it.remainingMillis ?: Long.MAX_VALUE }, { it.appName }),
-            )
-        if (next == _debugStates.value) return
-        _debugStates.value = next
+        if (debugPublishScheduled) return
+        debugPublishScheduled = true
+        scope.launch {
+            delay(DEBUG_PUBLISH_DEBOUNCE_MILLIS)
+            debugPublishScheduled = false
+            val next = debugEntries.values
+                .filter { it.state != GuardState.INACTIVE }
+                .sortedWith(
+                    compareBy({ it.remainingMillis ?: Long.MAX_VALUE }, { it.appName }),
+                )
+            if (next != _debugStates.value) _debugStates.value = next
+        }
     }
 
     // endregion
@@ -724,5 +828,14 @@ class GuardCoordinator(
 
         /** 切换证据回看窗的回溯量（毫秒）：容纳 UsageStats 落账延迟，排除挂起前的无关旧事件。 */
         const val LEAVE_EVIDENCE_BACKDATE_MILLIS = 2_000L
+
+        /** 挂起确认的窗口复扫起点（毫秒）：UsageStats 证据先行的宽限，之后由复扫裁决。 */
+        const val LEAVE_RESCAN_AFTER_MILLIS = 2_000L
+
+        /** 窗口复扫间隔（500ms 步长数）：每 2 秒复扫一次直到证实或安全窗到期。 */
+        const val LEAVE_RESCAN_EVERY_STEPS = 4L
+
+        /** 调试面板发布的防抖窗口（毫秒）：合并配置热更新引发的快照风暴。 */
+        const val DEBUG_PUBLISH_DEBOUNCE_MILLIS = 250L
     }
 }

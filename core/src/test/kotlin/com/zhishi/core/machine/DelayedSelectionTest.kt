@@ -132,18 +132,30 @@ class DelayedSelectionTest {
         assertIs<OverlaySpec.QuotaExhausted>(overlaySpecs(effects).single())
     }
 
-    /** 浮层退出后下次打开重新计满试探期；当日已用不回退。 */
+    /**
+     * 浮层退出后的语义（v1.2 调整）：保留窗口内重开直接弹选时（不再重新计满试探期）；
+     * 窗口（保留时长，每次退出重新起算）走完自动转闲置，下次打开才重新计满试探期；当日已用不回退。
+     */
     @Test
-    fun `浮层退出后下次打开重新试探`() {
+    fun `浮层退出后窗口内重开弹选时超窗重新试探`() {
         val clock = FakeClock()
         val machine = newMachine(trialConfig(), clock)
         machine.dispatch(GuardEvent.ForegroundEntered)
         tickAfter(machine, clock, 10 * 60_000L) // → 时间选择
-        machine.dispatch(GuardEvent.ConfirmExit) // 退出
+        machine.dispatch(GuardEvent.ConfirmExit) // 退出 → 起算重开窗口
+        assertEquals(GuardState.AWAITING_SELECTION, machine.snapshot.value.state)
+
+        // 窗口内重开：直接弹选时浮层
+        clock.advance(60_000L)
+        val effects = machine.dispatch(GuardEvent.ForegroundEntered)
+        assertEquals(GuardState.AWAITING_SELECTION, machine.snapshot.value.state)
+        assertIs<OverlaySpec.TimeSelection>(overlaySpecs(effects).single())
+
+        // 再次退出（窗口重新起算）→ 窗口走完：转闲置，重开重新计满试探期
+        machine.dispatch(GuardEvent.ConfirmExit)
+        tickAfter(machine, clock, 600_000L)
         assertEquals(GuardState.INACTIVE, machine.snapshot.value.state)
-
         machine.dispatch(GuardEvent.ForegroundEntered)
-
         assertEquals(GuardState.TRIAL_RUNNING, machine.snapshot.value.state)
         assertEquals(600_000L, machine.snapshot.value.remainingMillis) // 重新计满
         assertEquals(10 * 60_000L, machine.snapshot.value.usedTodayMillis) // 已用不回退

@@ -35,7 +35,10 @@ class ConfigUpdateAndRecoveryTest {
         val machine = newMachine(testConfig(Mechanism.TIME_SELECTION), clock)
         startSession(machine, 10)
         machine.onConfigUpdated(
-            testConfig(Mechanism.TIME_SELECTION, time = TimeParams(gracePeriodMillis = 30_000L)),
+            testConfig(
+                Mechanism.TIME_SELECTION,
+                time = TimeParams(gracePeriodMillis = 30_000L, smartTimingEnabled = false),
+            ),
         )
 
         machine.dispatch(GuardEvent.Backgrounded)

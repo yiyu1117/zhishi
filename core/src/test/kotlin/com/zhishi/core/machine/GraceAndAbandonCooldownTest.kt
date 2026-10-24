@@ -124,7 +124,12 @@ class GraceAndAbandonCooldownTest {
     @Test
     fun `宽限期与放弃冷却时长取自定义配置`() {
         val clock = FakeClock()
-        val time = TimeParams(gracePeriodMillis = 30_000L, abandonCooldownMillis = 45_000L)
+        // 固定值语义：显式关智能联动（v1.2 起默认开）
+        val time = TimeParams(
+            gracePeriodMillis = 30_000L,
+            abandonCooldownMillis = 45_000L,
+            smartTimingEnabled = false,
+        )
         val machine = newMachine(testConfig(Mechanism.TIME_SELECTION, Mechanism.ABANDON_COOLDOWN, time = time), clock)
         startSession(machine, 10)
         machine.dispatch(GuardEvent.Backgrounded)

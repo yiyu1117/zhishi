@@ -91,6 +91,16 @@ open class ZhishiAccessibilityService : AccessibilityService(), ForegroundDetect
     /** 单次窗口扫描结果：可见窗口包名集合 + 焦点窗口的根包名（可能为 null：无窗口持焦）。 */
     private data class WindowScan(val visiblePackages: Set<String>, val focusedPackage: String?)
 
+    /**
+     * 立即复扫窗口（v1.2，退后台挂起确认的兜底证据）：不依赖新事件到来。
+     * 可见窗口集合照常推给监视器，保持协调器"可见即前台"视角同步刷新。
+     */
+    override fun rescan(): WindowScanResult? {
+        val scan = scanWindows() ?: return null
+        listener?.onVisiblePackagesChanged(scan.visiblePackages)
+        return WindowScanResult(scan.visiblePackages, scan.focusedPackage)
+    }
+
     override fun onInterrupt() = Unit
 
     override fun onUnbind(intent: Intent?): Boolean {

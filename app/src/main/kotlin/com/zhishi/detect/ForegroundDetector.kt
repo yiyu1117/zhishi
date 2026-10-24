@@ -25,4 +25,17 @@ interface ForegroundDetector {
 
     /** 停止检测并释放回调。 */
     fun stop()
+
+    /**
+     * 立即复扫一次当前窗口（v1.2，退后台挂起确认的兜底证据）：无障碍实现返回
+     * 可见窗口集合 + 焦点窗口包名，并把可见窗口集合照常推给 listener；
+     * 轮询实现不支持，返回 null（调用方退回 UsageStats 证据路径）。
+     */
+    fun rescan(): WindowScanResult? = null
 }
+
+/** 窗口复扫结果（v1.2）：[focusedPackage] 为 null 表示当前无持焦窗口。 */
+data class WindowScanResult(
+    val visiblePackages: Set<String>,
+    val focusedPackage: String?,
+)

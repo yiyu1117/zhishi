@@ -1,18 +1,15 @@
 package com.zhishi.detect
 
 import android.app.Notification
-import android.app.NotificationChannel
 import android.app.NotificationManager
-import android.app.PendingIntent
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
-import androidx.core.app.NotificationCompat
 import androidx.lifecycle.LifecycleService
 import androidx.lifecycle.lifecycleScope
 import com.zhishi.AppGraph
-import com.zhishi.MainActivity
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 
 /**
@@ -24,7 +21,7 @@ import kotlinx.coroutines.launch
  * 由主控在协调器完成 —— 切换时须先 stop 本服务再 attach 无障碍 provider（onDestroy 会拆线）。
  *
  * 常驻通知随守护状态刷新：当前前台应用处于会话/延时中时，展示其剩余使用时长
- * （分钟粒度，值变化才 notify），其余情况回落到默认守护文案。
+ * （v1.2 起受「常驻通知显示剩余时长」设置控制，默认通用守护文案），值变化才 notify。
  */
 class PollingForegroundService : LifecycleService() {
 
@@ -35,19 +32,22 @@ class PollingForegroundService : LifecycleService() {
 
     override fun onCreate() {
         super.onCreate()
-        ensureChannel()
-        startForegroundCompat(buildNotification(CONTENT_TEXT_GUARDING))
+        GuardNotifications.ensureChannel(this, "兼容模式（UsageStats 轮询）的常驻守护通知")
+        startForegroundCompat(GuardNotifications.buildNotification(this, CONTENT_TEXT_GUARDING, NOTIFICATION_ID))
         lifecycleScope.launch {
             var lastText: String? = null
-            AppGraph.coordinator.notificationUsage.collect { usage ->
-                val text = usage?.let {
-                    "正在使用 ${it.appName}，剩余 ${minutesCeil(it.remainingMillis)} 分钟"
-                } ?: CONTENT_TEXT_GUARDING
-                if (text == lastText) return@collect
-                lastText = text
-                getSystemService(NotificationManager::class.java)
-                    ?.notify(NOTIFICATION_ID, buildNotification(text))
-            }
+            // v1.2：剩余时长展示受「常驻通知显示剩余时长」设置控制（默认关——通用守护文案）
+            combine(
+                AppGraph.coordinator.notificationUsage,
+                AppGraph.settingsRepository.notificationUsageVisible,
+            ) { usage, visible -> if (visible) usage else null }
+                .collect { usage ->
+                    val text = usage?.let(GuardNotifications::usageText) ?: CONTENT_TEXT_GUARDING
+                    if (text == lastText) return@collect
+                    lastText = text
+                    getSystemService(NotificationManager::class.java)
+                        ?.notify(NOTIFICATION_ID, GuardNotifications.buildNotification(this@PollingForegroundService, text, NOTIFICATION_ID))
+                }
         }
     }
 
@@ -58,7 +58,7 @@ class PollingForegroundService : LifecycleService() {
                 // 运行时发现无使用情况访问权限：更新通知内容提示后自停，
                 // 等待用户在引导卡授权后（主控/用户重新拉起）再恢复守护。
                 getSystemService(NotificationManager::class.java)
-                    ?.notify(NOTIFICATION_ID, buildNotification(CONTENT_TEXT_NO_PERMISSION))
+                    ?.notify(NOTIFICATION_ID, GuardNotifications.buildNotification(this, CONTENT_TEXT_NO_PERMISSION, NOTIFICATION_ID))
                 lifecycleScope.launch {
                     delay(STOP_DELAY_MILLIS) // 留出让通知浮出的时间
                     stopSelf()
@@ -94,33 +94,6 @@ class PollingForegroundService : LifecycleService() {
 
     // region 通知
 
-    private fun ensureChannel() {
-        val nm = getSystemService(NotificationManager::class.java) ?: return
-        nm.createNotificationChannel(
-            NotificationChannel(CHANNEL_ID, CHANNEL_NAME, NotificationManager.IMPORTANCE_LOW).apply {
-                description = "兼容模式（UsageStats 轮询）的常驻守护通知"
-                setShowBadge(false)
-            },
-        )
-    }
-
-    private fun buildNotification(text: String): Notification {
-        val contentIntent = PendingIntent.getActivity(
-            this,
-            0,
-            Intent(this, MainActivity::class.java),
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
-        )
-        return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.ic_lock_idle_lock)
-            .setContentTitle(CHANNEL_NAME)
-            .setContentText(text)
-            .setContentIntent(contentIntent)
-            .setOngoing(true)
-            .setOnlyAlertOnce(true)
-            .build()
-    }
-
     private fun startForegroundCompat(notification: Notification) {
         if (Build.VERSION.SDK_INT >= 34) {
             startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
@@ -130,15 +103,10 @@ class PollingForegroundService : LifecycleService() {
         }
     }
 
-    /** 毫秒向上取整到分钟（通知剩余时长的展示粒度，分钟值变化才更新通知）。 */
-    private fun minutesCeil(millis: Long): Long = (millis + 59_999L) / 60_000L
-
     // endregion
 
     private companion object {
-        const val CHANNEL_ID = "zhishi_guard"
-        const val CHANNEL_NAME = "知时守护中"
-        const val NOTIFICATION_ID = 1001
+        const val NOTIFICATION_ID = GuardNotifications.NOTIFICATION_ID_GUARD
         const val STOP_DELAY_MILLIS = 3_000L
         const val CONTENT_TEXT_GUARDING = "正在按秒轮询前台应用，守护使用时长"
         const val CONTENT_TEXT_NO_PERMISSION = "缺少「使用情况访问」权限，守护已暂停，请到引导页授权"

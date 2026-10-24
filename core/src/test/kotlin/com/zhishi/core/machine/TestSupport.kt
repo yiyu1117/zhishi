@@ -19,8 +19,18 @@ class FakeClock(startMillis: Long = 0L) : AppClock {
 internal fun testConfig(
     vararg mechanisms: Mechanism,
     dailyLimitMinutes: Int = 0,
-    time: TimeParams = TimeParams(),
+    time: TimeParams = DEFAULT_TEST_TIME,
 ): GroupConfig = GroupConfig(mechanisms.toSet(), dailyLimitMinutes, time)
+
+/**
+ * 测试基座的时间参数：显式固定"智能联动关、共享冷却关"。
+ * v1.2 起生产默认值为开（新分组默认启用智能/共享），测试大多针对固定值语义，
+ * 需要智能/共享行为的用例各自显式开启。
+ */
+internal val DEFAULT_TEST_TIME = TimeParams(
+    smartTimingEnabled = false,
+    sharedCooldownEnabled = false,
+)
 
 internal fun newMachine(
     config: GroupConfig,

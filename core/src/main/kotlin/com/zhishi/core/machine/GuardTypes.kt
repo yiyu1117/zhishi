@@ -119,8 +119,13 @@ sealed interface ToastEvent {
 
 /** 状态机的效果输出：由协调器翻译为系统动作。 */
 sealed interface GuardEffect {
-    /** 显示拦截浮层（全屏覆盖目标应用）。 */
-    data class ShowOverlay(val spec: OverlaySpec) : GuardEffect
+    /**
+     * 显示拦截浮层（全屏覆盖目标应用）。
+     * [mediaPauseDelayMillis] > 0 时媒体暂停指令延迟发送（v1.2）：开屏选时拦截下，
+     * 应用开屏尚在加载数据、媒体会话未就绪，立即暂停落空——等 3 秒让播放器起来再暂停。
+     * 其余拦截窗（冷却/额度/禁止/使用中期满）保持弹出即暂停。
+     */
+    data class ShowOverlay(val spec: OverlaySpec, val mediaPauseDelayMillis: Long = 0L) : GuardEffect
 
     /** 关闭当前浮层。 */
     data object HideOverlay : GuardEffect
@@ -153,7 +158,18 @@ data class GuardSnapshot(
     val usedTodayMillis: Long,
     /** 今日剩余额度分钟（null = 不限额）。 */
     val todayRemainingMinutes: Int?,
+    /**
+     * 进度清零倒计时（v1.2，调试悬浮窗用）：试探期暂停中的中断保留剩余，
+     * 或试探期满退出选时浮层后的重开窗口剩余；null = 无。
+     */
+    val resetCountdownMillis: Long? = null,
 )
+
+/**
+ * 开屏选时浮层的媒体暂停延迟（毫秒）：开屏时应用尚未加载完数据、媒体会话未就绪，
+ * 立即派发暂停键落空——延迟到播放器起来后再暂停（v1.2）。使用中期满等其余拦截不延迟。
+ */
+const val OPEN_SCREEN_MEDIA_PAUSE_DELAY_MILLIS = 3_000L
 
 /** 持久化恢复数据：重启后重建状态机。 */
 data class GuardStateData(
@@ -174,6 +190,11 @@ data class GuardStateData(
     val sessionSelectedMillis: Long? = null,
     /** 试探期退后台的暂停时刻（epoch millis）：恢复后据此判中断保留（超时清零/保留续计）。 */
     val trialPausedAtMillis: Long? = null,
+    /**
+     * 试探期满未选时间的重开窗口截止（epoch millis，v1.2）：退出选时浮层后起算保留时长，
+     * 窗口内重开直接弹选时浮层；null = 常规待选择（无窗口语义）。
+     */
+    val selectionDeadlineMillis: Long? = null,
 ) {
     companion object {
         val EMPTY = GuardStateData(GuardState.INACTIVE)
@@ -194,6 +215,12 @@ abstract class GuardStateMachine(
 
     /** 分组配置被编辑后热更新（不得清空会话/冷却状态；换组由协调器重建实例处理）。 */
     abstract fun onConfigUpdated(newConfig: GroupConfig)
+
+    /**
+     * 配置保存后的运行状态重置（v1.2）：会话/试探/冷却/宽限全清，回到闲置
+     * （当日已用与额度禁用语义保留），防止状态残留使配置更改无法立刻生效。
+     */
+    abstract fun resetRuntimeState()
 
     /** 导出可持久化状态。 */
     abstract fun exportState(): GuardStateData
