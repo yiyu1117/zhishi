@@ -57,8 +57,8 @@ import com.zhishi.data.SettingsRepository
 import kotlinx.coroutines.launch
 
 /**
- * 设置屏：自律锁 / 检测模式 / 默认参数（对新创建的分组生效）。
- * 自律锁生效中（时段外）时本页所有写操作禁用，仅保留浏览与返回。
+ * 设置屏：自律锁 / 检测模式 / 默认参数（对新创建的分组生效）/ 分组配置导入导出。
+ * 自律锁生效中（时段外）时本页所有写操作禁用（导出除外——只读操作），仅保留浏览与返回。
  */
 @Composable
 internal fun SettingsScreen(onBack: () -> Unit) {
@@ -453,6 +453,10 @@ internal fun SettingsScreen(onBack: () -> Unit) {
             }
             // endregion
 
+            // region 分组配置导入/导出（v1.2.1：本版仅导出；导出只读，自律锁生效期间仍可用）
+            GroupConfigExportSection()
+            // endregion
+
             // region 调试模式（置于最底，排查用；v1.2 起默认折叠）
             CollapsibleSettingsSection(title = "调试模式", initiallyExpanded = false) {
                 Row(
@@ -567,7 +571,7 @@ internal fun SettingsScreen(onBack: () -> Unit) {
 // region 通用小组件
 
 @Composable
-private fun SettingsSection(title: String, content: @Composable ColumnScope.() -> Unit) {
+internal fun SettingsSection(title: String, content: @Composable ColumnScope.() -> Unit) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(
             Modifier.fillMaxWidth().padding(16.dp),
