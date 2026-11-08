@@ -13,6 +13,8 @@ import com.zhishi.core.machine.GuardSnapshot
 import com.zhishi.core.machine.GuardState
 import com.zhishi.core.machine.GuardStateData
 import com.zhishi.core.machine.GuardStateMachine
+import com.zhishi.core.machine.HeldNotificationUsage
+import com.zhishi.core.machine.NotificationUsagePolicy
 import com.zhishi.core.machine.ToastEvent
 import com.zhishi.core.model.DetectionMode
 import com.zhishi.core.model.Group
@@ -148,6 +150,13 @@ class GuardCoordinator(
     private val _notificationUsage = MutableStateFlow<NotificationUsage?>(null)
     val notificationUsage: StateFlow<NotificationUsage?> = _notificationUsage.asStateFlow()
 
+    /**
+     * 退后台保留中的用量（v1.2.1）：会话中的机器退后台时冻结其会话剩余——宽限期内
+     * 会话计时暂停，冻结值与真实状态一致；通知策略据此在 20 秒保留窗口内继续展示
+     * （下拉通知栏被误判为切屏时用户仍能看到剩余时长）。最近一次退后台者优先。
+     */
+    private var heldNotificationUsage: HeldNotificationUsage? = null
+
     /** 调试悬浮窗数据流：活动状态机的实时状态（闲置不显示），设置页「调试模式」开关控制显隐。 */
     private val _debugStates = MutableStateFlow<List<MachineDebugEntry>>(emptyList())
     val debugStates: StateFlow<List<MachineDebugEntry>> = _debugStates.asStateFlow()
@@ -240,6 +249,7 @@ class GuardCoordinator(
         machineJobs.clear()
         lastForeground = null
         rulesSnapshot = null
+        heldNotificationUsage = null
         _notificationUsage.value = null
         pendingLeaves.values.forEach { it.cancel() }
         pendingLeaves.clear()
@@ -432,31 +442,47 @@ class GuardCoordinator(
         pendingLeaves.remove(pkg)?.cancel()
         if (!foregroundMachines.remove(pkg)) return
         AppLog.d(TAG, "退后台 pkg=$pkg")
-        machines[pkg]?.let { translate(pkg, it.dispatch(GuardEvent.Backgrounded)) }
+        machines[pkg]?.let {
+            holdUsageOnLeave(pkg, it.snapshot.value)
+            translate(pkg, it.dispatch(GuardEvent.Backgrounded))
+        }
         refreshNotificationUsage()
     }
 
     /**
-     * 刷新通知用量载荷：优先取焦点所在机器，其余前台机器兜底——发布首个处于
-     * 会话中（RUNNING）/ 延时中（EXTENSION_RUNNING）且剩余非空者的活动剩余。
-     * StateFlow 按值去重，调用方无需判变。
+     * 退后台保留捕获（v1.2.1）：会话中（RUNNING）的机器退后台时冻结其会话剩余。
+     * 仅 RUNNING 保留——延时退后台按机器语义即入冷却（冷却中的应用绝不显示剩余），
+     * 其余状态本就无可发布用量。保留随下一次符合条件退后台覆盖（最近者优先）。
+     */
+    private fun holdUsageOnLeave(pkg: String, snapshot: GuardSnapshot) {
+        val remaining = snapshot.remainingMillis
+        if (snapshot.state == GuardState.RUNNING && remaining != null && remaining > 0L) {
+            heldNotificationUsage = HeldNotificationUsage(pkg, remaining, System.currentTimeMillis())
+        }
+    }
+
+    /**
+     * 刷新通知用量载荷：核心判定下沉为 [NotificationUsagePolicy] 纯策略（v1.2.1）——
+     * 优先发布前台会话/延时的实时剩余；无可发布者时，会话退后台的 20 秒保留窗口内
+     * 继续展示冻结的会话剩余（宽限期内会话计时暂停，冻结值与真实状态一致），期满或
+     * 状态失效（转入冷却/额度耗尽/机器移除）即回落 null。StateFlow 按值去重，调用方无需判变。
      */
     private fun refreshNotificationUsage() {
         val candidates = buildList {
             lastForeground?.let { if (it in foregroundMachines) add(it) }
             foregroundMachines.forEach { if (it !in this) add(it) }
         }
-        for (pkg in candidates) {
-            val snapshot = machines[pkg]?.snapshot?.value ?: continue
-            val remaining = snapshot.remainingMillis
-            if ((snapshot.state == GuardState.RUNNING || snapshot.state == GuardState.EXTENSION_RUNNING) &&
-                remaining != null && remaining > 0L
-            ) {
-                _notificationUsage.value = NotificationUsage(catalog.appName(pkg), remaining)
-                return
-            }
+        val foregroundSnapshots = candidates.mapNotNull { machines[it]?.snapshot?.value }
+        val held = heldNotificationUsage
+        val payload = NotificationUsagePolicy.resolve(
+            foregroundSnapshots = foregroundSnapshots,
+            held = held,
+            heldSnapshot = held?.let { machines[it.packageName]?.snapshot?.value },
+            nowMillis = System.currentTimeMillis(),
+        )
+        _notificationUsage.value = payload?.let {
+            NotificationUsage(catalog.appName(it.packageName), it.remainingMillis)
         }
-        _notificationUsage.value = null
     }
 
     // endregion
@@ -748,6 +774,8 @@ class GuardCoordinator(
             ledger.setUsage(pkg, day, usedToday)
             ledger.clearGuardState(pkg)
         }
+        // 被移除的机器若正处退后台保留期，其快照流已停止：立即刷新让保留按"机器已移除"回落
+        refreshNotificationUsage()
     }
 
     /** 浮层内容以状态机快照收敛（效果路径之外的兜底，同时驱动冷却倒计时等刷新）。 */
