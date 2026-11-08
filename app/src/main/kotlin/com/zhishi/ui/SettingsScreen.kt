@@ -78,6 +78,8 @@ internal fun SettingsScreen(onBack: () -> Unit) {
     var editingStart by remember { mutableStateOf(false) }
     var editingEnd by remember { mutableStateOf(false) }
     var showLockEnableDialog by remember { mutableStateOf(false) }
+    // 切向轮询的实验性确认弹窗（票 05）：取消不切换，确认才走原 setter
+    var showPollingConfirm by remember { mutableStateOf(false) }
 
     val tp = params
     val currentMode = mode
@@ -177,18 +179,24 @@ internal fun SettingsScreen(onBack: () -> Unit) {
 
             // region 检测模式
             SettingsSection(title = "检测模式") {
+                // 票 05：每次切向轮询先弹实验性确认（取消不切换）；切回无障碍/重复点选不拦
+                val selectMode: (DetectionMode) -> Unit = { candidate ->
+                    if (shouldConfirmPollingSwitch(currentMode, candidate)) {
+                        showPollingConfirm = true
+                    } else {
+                        scope.launch { repo.setDetectionMode(candidate) }
+                    }
+                }
                 DetectionMode.entries.forEach { candidate ->
                     Row(
                         Modifier.fillMaxWidth()
-                            .clickable(enabled = !lock.locked) {
-                                scope.launch { repo.setDetectionMode(candidate) }
-                            },
+                            .clickable(enabled = !lock.locked) { selectMode(candidate) },
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         RadioButton(
                             selected = currentMode == candidate,
                             enabled = !lock.locked,
-                            onClick = { scope.launch { repo.setDetectionMode(candidate) } },
+                            onClick = { selectMode(candidate) },
                         )
                         Column(Modifier.weight(1f)) {
                             Text(detectionModeLabel(candidate), style = MaterialTheme.typography.bodyLarge)
@@ -529,6 +537,16 @@ internal fun SettingsScreen(onBack: () -> Unit) {
             dismissButton = {
                 TextButton(onClick = { showLockEnableDialog = false }) { Text("取消") }
             },
+        )
+    }
+
+    if (showPollingConfirm) {
+        PollingModeConfirmDialog(
+            onConfirm = {
+                showPollingConfirm = false
+                scope.launch { repo.setDetectionMode(DetectionMode.POLLING) }
+            },
+            onDismiss = { showPollingConfirm = false },
         )
     }
 
@@ -916,5 +934,6 @@ private fun detectionModeLabel(mode: DetectionMode): String = when (mode) {
 
 private fun detectionModeDesc(mode: DetectionMode): String = when (mode) {
     DetectionMode.ACCESSIBILITY -> "毫秒级响应，无常驻服务。"
-    DetectionMode.POLLING -> "有 1–2 秒检测延迟，需常驻通知、电池优化豁免与开机自启。"
+    // 票 05：轮询为实验性功能，描述行直接标注（不进弹窗也能看到风险）
+    DetectionMode.POLLING -> "实验性功能：有 1–2 秒检测延迟，需常驻通知、电池优化豁免与开机自启。"
 }
