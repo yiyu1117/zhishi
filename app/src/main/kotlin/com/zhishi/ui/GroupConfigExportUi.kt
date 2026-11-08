@@ -33,7 +33,11 @@ import androidx.compose.ui.unit.sp
 import com.zhishi.data.ExportGlobalSettings
 import com.zhishi.data.ExportScope
 import com.zhishi.data.GroupConfigExport
+import com.zhishi.data.GroupConfigImport
+import com.zhishi.data.GroupImportPlan
 import com.zhishi.data.GroupRepository
+import com.zhishi.data.ImportMergeResult
+import com.zhishi.data.ImportParseResult
 import java.time.LocalDate
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
@@ -41,18 +45,61 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * 设置页「分组配置导入/导出」节（v1.2.1，本版仅导出）：
- * - 点导出先选两档（仅分组配置 / 含全局设置），再经系统文档选择器（CreateDocument）保存 JSON；
- * - 导出为只读操作，自律锁生效期间仍可用——本节不参与锁定门禁。
+ * 设置页「分组配置导入/导出」节（v1.2.1）：
+ * - 导出：先选两档（仅分组配置 / 含全局设置），再经系统文档选择器（CreateDocument）保存 JSON；
+ * - 导入：经文档选择器（OpenDocument）选本应用导出的 JSON，解析出概况后弹确认框，
+ *   确认后按分组 id 合并覆盖一次性写入（全量校验先行，损坏/不合规文件整体拒绝）；
+ * - 导出为只读操作，自律锁生效期间仍可用；导入是写操作，锁定期间禁用（与其他写操作一致 fail-closed）。
  */
 @Composable
-internal fun GroupConfigExportSection() {
+internal fun GroupConfigExportSection(lock: DisciplineLockUi) {
     val context = LocalContext.current
     val settingsRepo = rememberSettingsRepository()
     val groupRepo = remember(context) { GroupRepository(context.applicationContext) }
     val scope = rememberCoroutineScope()
     var showScopeDialog by remember { mutableStateOf(false) }
     var pendingScope by remember { mutableStateOf<ExportScope?>(null) }
+    // 已解析并合并好的导入计划（非空即展示确认框）
+    var pendingPlan by remember { mutableStateOf<GroupImportPlan?>(null) }
+
+    // —— 导入：选文件 →（IO）解析 + 对照本机快照合并 → 概况确认框 → 一次性写入 ——
+    val importLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        scope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    val text = context.contentResolver.openInputStream(uri)?.use { input ->
+                        input.readBytes().toString(Charsets.UTF_8)
+                    } ?: error("无法读取所选文件")
+                    val payload = when (val parsed = GroupConfigImport.parse(text)) {
+                        is ImportParseResult.Ok -> parsed.payload
+                        is ImportParseResult.Rejected -> error(parsed.reason)
+                    }
+                    // 合并对照写入时刻的仓库快照（而非组合期旧值），保证概况即将发生的事实
+                    when (val merged = GroupConfigImport.planMerge(
+                        payload,
+                        groupRepo.groups.first(),
+                        groupRepo.assignments.first(),
+                    )) {
+                        is ImportMergeResult.Ok -> merged.plan
+                        is ImportMergeResult.Rejected -> error(merged.reason)
+                    }
+                }
+            }
+            result.fold(
+                onSuccess = { plan -> pendingPlan = plan },
+                onFailure = { e ->
+                    Toast.makeText(
+                        context,
+                        "导入失败：${e.message ?: "未知错误"}",
+                        Toast.LENGTH_LONG,
+                    ).show()
+                },
+            )
+        }
+    }
 
     val exportLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.CreateDocument("application/json"),
@@ -121,6 +168,30 @@ internal fun GroupConfigExportSection() {
         ) {
             Text("导出分组配置", fontSize = 15.sp)
         }
+        Spacer(Modifier.height(2.dp))
+        Text(
+            "导入此前导出的 JSON 文件，按分组 id 合并覆盖：" +
+                "同 id 覆盖、新组新建、本机其余分组与配置原样保留。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Button(
+            onClick = {
+                // 兼容不同文档提供方对 .json 的类型标注（部分提供方标注为文本或二进制流）
+                importLauncher.launch(arrayOf("application/json", "text/plain", "application/octet-stream"))
+            },
+            enabled = !lock.locked,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text("导入分组配置", fontSize = 15.sp)
+        }
+        if (lock.locked) {
+            Text(
+                "自律锁生效期间不可导入；导出为只读操作，不受限。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+            )
+        }
     }
 
     if (showScopeDialog) {
@@ -133,6 +204,118 @@ internal fun GroupConfigExportSection() {
             onDismiss = { showScopeDialog = false },
         )
     }
+
+    pendingPlan?.let { plan ->
+        ImportConfirmDialog(
+            plan = plan,
+            onConfirm = {
+                // 弹窗存续期间锁可能已生效：确认时再次校验，fail-closed
+                if (lock.locked) {
+                    pendingPlan = null
+                    Toast.makeText(context, "自律锁生效期间不可导入", Toast.LENGTH_LONG).show()
+                    return@ImportConfirmDialog
+                }
+                scope.launch {
+                    val result = withContext(Dispatchers.IO) {
+                        runCatching {
+                            // 分组与分配单事务整体写入；全局设置经现有 setter 逐项应用，
+                            // 检测模式切换等服务启停联动自然发生
+                            groupRepo.applyImportPlan(plan)
+                            plan.global?.let { g ->
+                                settingsRepo.setDetectionMode(g.detectionMode)
+                                settingsRepo.setDefaultTimeParams(g.defaultTimeParams)
+                                settingsRepo.setNewGroupDailyLimitMinutes(g.newGroupDailyLimitMinutes)
+                                settingsRepo.setDisciplineLock(g.disciplineLock)
+                                settingsRepo.setNotificationUsageVisible(g.notificationUsageVisible)
+                            }
+                        }
+                    }
+                    result.fold(
+                        onSuccess = {
+                            Toast.makeText(context, "分组配置已导入", Toast.LENGTH_SHORT).show()
+                        },
+                        onFailure = { e ->
+                            Toast.makeText(
+                                context,
+                                "导入失败：${e.message ?: "未知错误"}",
+                                Toast.LENGTH_LONG,
+                            ).show()
+                        },
+                    )
+                    pendingPlan = null
+                }
+            },
+            onDismiss = { pendingPlan = null },
+        )
+    }
+}
+
+/** 导入概况确认框：展示文件将覆盖/新建哪些分组、分配条数与是否含全局设置，确认才写入。 */
+@Composable
+private fun ImportConfirmDialog(
+    plan: GroupImportPlan,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val overwrittenNames = plan.overwrittenGroups.map { it.name }
+    val createdNames = plan.createdGroups.map { it.name }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("确认导入") },
+        text = {
+            Column {
+                Text(
+                    "文件包含 ${plan.groups.size} 个分组：" +
+                        "覆盖 ${overwrittenNames.size} 个、新建 ${createdNames.size} 个。",
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                if (overwrittenNames.isNotEmpty()) {
+                    Text(
+                        "覆盖：${overwrittenNames.joinToString("、")}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                if (createdNames.isNotEmpty()) {
+                    Text(
+                        "新建：${createdNames.joinToString("、")}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "应用分配 ${plan.fileAssignmentCount} 条将逐条覆盖" +
+                        "（未提及的应用保持原分配；未安装的应用也会记录，安装后即受管控）。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    if (plan.global != null) {
+                        "文件含全局设置：将一并应用检测模式、默认参数、新建组默认限额、" +
+                            "自律锁与常驻通知显示剩余时长开关。"
+                    } else {
+                        "文件不含全局设置。"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "同 id 分组将被覆盖；本机其余分组与配置原样保留。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onConfirm) { Text("确认导入") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("取消") }
+        },
+    )
 }
 
 /** 两档选择框：确认后才拉起系统保存框。 */

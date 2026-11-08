@@ -152,6 +152,39 @@ class GroupRepository(private val appContext: Context) {
         _configUpdates.tryEmit(GroupConfigUpdate(groupId, effective))
     }
 
+    /**
+     * 分组配置导入（v1.2.1）：把合并后的目标状态一次性写入（单次 [androidx.datastore.preferences.core.edit]，
+     * 全有或全无——校验由导入侧纯函数先行完成，见 [GroupConfigImport.planMerge]）。
+     * 既有分组（含顺序）保持、文件新组追加；分配表全量替换为合并结果（不含默认组条目）。
+     * 黑名单每日限额再次钳制 -1，与 [updateConfig] 同口径。写入后对同 id 覆盖的分组发配置更新，
+     * 成员运行状态确定性重置（与手动改配置同语义）；新组尚无成员，快照流自会为其建机。
+     */
+    suspend fun applyImportPlan(plan: GroupImportPlan) {
+        dataStore.edit { prefs ->
+            for (group in plan.groups) {
+                val effective = if (group.id == GroupIds.BLACKLIST) {
+                    group.config.copy(dailyLimitMinutes = -1)
+                } else {
+                    group.config
+                }
+                if (group.id !in GroupIds.BUILT_IN) prefs[nameKey(group.id)] = group.name
+                prefs[mechKey(group.id)] = effective.mechanisms.joinToString(",") { it.ordinal.toString() }
+                prefs[limitKey(group.id)] = effective.dailyLimitMinutes
+                prefs[timeKey(group.id)] = TimeParamsFormat.encode(effective.time)
+            }
+            prefs[CUSTOM_ORDER_KEY] = plan.groups
+                .filter { it.id !in GroupIds.BUILT_IN }
+                .joinToString(",") { it.id }
+            // 分配表全量替换：先清全部既有键，再写入合并结果
+            prefs.asMap().keys
+                .filterIsInstance<Preferences.Key<String>>()
+                .filter { it.name.startsWith(ASSIGN_PREFIX) }
+                .forEach { prefs.remove(it) }
+            plan.assignments.forEach { (pkg, gid) -> prefs[assignKey(pkg)] = gid }
+        }
+        plan.overwrittenGroups.forEach { _configUpdates.tryEmit(GroupConfigUpdate(it.id, it.config)) }
+    }
+
     // region 解码 / 编码
 
     private fun decodeGroups(prefs: Preferences): List<Group> = buildList {

@@ -474,8 +474,8 @@ internal fun SettingsScreen(onBack: () -> Unit) {
             }
             // endregion
 
-            // region 分组配置导入/导出（v1.2.1：本版仅导出；导出只读，自律锁生效期间仍可用）
-            GroupConfigExportSection()
+            // region 分组配置导入/导出（v1.2.1：导出只读，自律锁生效期间仍可用；导入为写操作，锁定期间禁用）
+            GroupConfigExportSection(lock = lock)
             // endregion
 
             // region 调试模式（票 06：默认完全隐藏——双击下方「关于」节版本号解锁；
