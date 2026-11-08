@@ -22,7 +22,6 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -59,7 +58,8 @@ fun KeepAliveGuideCard(modifier: Modifier = Modifier, onDismiss: () -> Unit) {
         batteryExempt = isIgnoringBatteryOptimizations(context)
     }
 
-    // 用户跳系统设置授权后返回本页时刷新状态
+    // 首帧与跳系统设置授权后返回本页都经 ON_RESUME 触发刷新：观察者注册时若已处于
+    // Resumed 状态，Lifecycle 会补发 ON_RESUME，无需再单独跑一遍首帧刷新
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) refresh()
@@ -67,7 +67,6 @@ fun KeepAliveGuideCard(modifier: Modifier = Modifier, onDismiss: () -> Unit) {
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
-    LaunchedEffect(Unit) { refresh() }
 
     Card(modifier = modifier.fillMaxWidth()) {
         Column(

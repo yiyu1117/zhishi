@@ -6,7 +6,6 @@ import com.zhishi.core.model.Group
 import com.zhishi.core.model.GroupConfig
 import com.zhishi.core.model.GroupKind
 import com.zhishi.core.model.Mechanism
-import com.zhishi.core.model.TimeParams
 
 /** 导入文件解析结果：合法载荷，或整体拒绝（reason 为面向用户的中文文案）。 */
 sealed class ImportParseResult {
@@ -70,7 +69,9 @@ object GroupConfigImport {
         payload.assignments.values.firstOrNull { it !in mergedIds }?.let { ghost ->
             return ImportMergeResult.Rejected("文件中的应用分配指向不存在的分组：$ghost")
         }
-        // 同 id 覆盖以文件为准；黑名单组每日限额强制保持 -1 禁用语义（与仓库 updateConfig 一致）
+        // 同 id 覆盖以文件为准。黑名单组每日限额 -1 禁用语义的不变量由仓库写入路径单点持有
+        // （GroupRepository.updateConfig / applyImportPlan 的写入与热更新事件均钳制）；
+        // 计划即一次性写入的目标全集，此处冗余钳制属纵深防御，保证计划自身即合法状态。
         val overridden = payload.groups.associate { fg ->
             val effective = if (fg.id == GroupIds.BLACKLIST) fg.config.copy(dailyLimitMinutes = -1) else fg.config
             fg.id to Group(fg.id, fg.name, fg.kind, effective)
@@ -151,7 +152,7 @@ object GroupConfigImport {
         val config = GroupConfig(
             mechanisms = decodeMechanisms(configO, id),
             dailyLimitMinutes = int(configO, "dailyLimitMinutes"),
-            time = decodeTimeStrictly(str(configO, "time"))
+            time = TimeParamsFormat.decodeStrict(str(configO, "time"))
                 ?: fail("分组「$id」时间参数无法解析"),
         )
         return ExportGroup(id, name, kind, config)
@@ -175,7 +176,7 @@ object GroupConfigImport {
         val modeName = str(o, "detectionMode")
         val mode = DetectionMode.entries.firstOrNull { it.name == modeName }
             ?: fail("detectionMode 非法：$modeName")
-        val params = decodeTimeStrictly(str(o, "defaultTimeParams"))
+        val params = TimeParamsFormat.decodeStrict(str(o, "defaultTimeParams"))
             ?: fail("默认时间参数无法解析")
         val lockO = obj(o, "disciplineLock")
         val lock = DisciplineLockConfig(
@@ -190,40 +191,6 @@ object GroupConfigImport {
             disciplineLock = lock,
             notificationUsageVisible = bool(o, "notificationUsageVisible"),
         )
-    }
-
-    /**
-     * time 串的导入侧严格解码：20 段分号分隔，各段形状与 [TimeParamsFormat] 一致
-     * （数值段必须可解析、布尔段为 0/1、快选档 6 个正整数、提醒刻度可整段为空）。
-     * 存储侧解码器对损坏段静默回退默认值——导入必须整体拒绝，不能带病写入。
-     */
-    private fun decodeTimeStrictly(encoded: String): TimeParams? {
-        val parts = encoded.split(';')
-        if (parts.size != 20) return null
-        // 段 0：快选档位 = 6 个正整数
-        val quick = parts[0].split(',')
-        if (quick.size != 6 || quick.any { (it.toIntOrNull() ?: 0) <= 0 }) return null
-        // 段 1/2/3/6/7/8/19：毫秒值（可为任意整数，语义钳制沿用 TimeParamsFormat）
-        listOf(1, 2, 3, 6, 7, 8, 19).forEach { idx ->
-            if (parts[idx].toLongOrNull() == null) return null
-        }
-        // 段 4 延时分钟 / 段 9 提示间隔 / 段 11 自定义上限 / 段 18 试探期：正整数
-        listOf(4, 9, 11, 18).forEach { idx ->
-            if ((parts[idx].toIntOrNull() ?: 0) <= 0) return null
-        }
-        if (parts[5].toIntOrNull() == null) return null // 段 5 预告秒（钳制 0–600）
-        // 段 10：提醒刻度——可整段为空（用户删光刻度的合法状态），否则每段均为正整数
-        if (parts[10].isNotEmpty() &&
-            parts[10].split(',').any { (it.toIntOrNull() ?: 0) <= 0 }
-        ) return null
-        // 段 12/16：布尔（0/1）；段 13/14/15/17：比例整数（钳制 0–100）
-        listOf(12, 16).forEach { idx ->
-            if (parts[idx] != "0" && parts[idx] != "1") return null
-        }
-        listOf(13, 14, 15, 17).forEach { idx ->
-            if (parts[idx].toIntOrNull() == null) return null
-        }
-        return TimeParamsFormat.decode(encoded)
     }
 
     // endregion
@@ -351,7 +318,7 @@ object GroupConfigImport {
                             '\\' -> sb.append('\\')
                             '/' -> sb.append('/')
                             'b' -> sb.append('\b')
-                            'f' -> sb.append('')
+                            'f' -> sb.append('\u000C')
                             'n' -> sb.append('\n')
                             'r' -> sb.append('\r')
                             't' -> sb.append('\t')

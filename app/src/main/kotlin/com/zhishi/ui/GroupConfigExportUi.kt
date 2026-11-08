@@ -30,12 +30,12 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.zhishi.AppGraph
 import com.zhishi.data.ExportGlobalSettings
 import com.zhishi.data.ExportScope
 import com.zhishi.data.GroupConfigExport
 import com.zhishi.data.GroupConfigImport
 import com.zhishi.data.GroupImportPlan
-import com.zhishi.data.GroupRepository
 import com.zhishi.data.ImportMergeResult
 import com.zhishi.data.ImportParseResult
 import java.time.LocalDate
@@ -55,7 +55,7 @@ import kotlinx.coroutines.withContext
 internal fun GroupConfigExportSection(lock: DisciplineLockUi) {
     val context = LocalContext.current
     val settingsRepo = rememberSettingsRepository()
-    val groupRepo = remember(context) { GroupRepository(context.applicationContext) }
+    val groupRepo = AppGraph.groupRepository
     val scope = rememberCoroutineScope()
     var showScopeDialog by remember { mutableStateOf(false) }
     var pendingScope by remember { mutableStateOf<ExportScope?>(null) }

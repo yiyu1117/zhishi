@@ -171,7 +171,7 @@ object GroupConfigExport {
                 '\r' -> append("\\r")
                 '\t' -> append("\\t")
                 '\b' -> append("\\b")
-                '' -> append("\\f")
+                '\u000C' -> append("\\f")
                 else ->
                     if (c < ' ') {
                         append("\\u")
