@@ -69,6 +69,8 @@ fun ZhishiRootUi() {
         initialValue = DetectionMode.ACCESSIBILITY,
     )
     val scope = rememberCoroutineScope()
+    // 引导页「改用兼容模式」的实验性确认弹窗（票 05）：与设置页共用同一弹窗与决策
+    var showPollingConfirm by remember { mutableStateOf(false) }
 
     // 从系统设置返回时刷新权限状态
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -103,9 +105,18 @@ fun ZhishiRootUi() {
             else -> MainScreen()
         }
         else -> AccessibilityGuideScreen(
-            onUseCompat = {
+            onUseCompat = { showPollingConfirm = true },
+        )
+    }
+
+    // 引导路径的切向轮询同样先过实验性确认（票 05）：取消不切换，确认才写入
+    if (showPollingConfirm) {
+        PollingModeConfirmDialog(
+            onConfirm = {
+                showPollingConfirm = false
                 scope.launch { AppGraph.settingsRepository.setDetectionMode(DetectionMode.POLLING) }
             },
+            onDismiss = { showPollingConfirm = false },
         )
     }
 }
@@ -117,8 +128,8 @@ private fun AccessibilityGuideScreen(onUseCompat: () -> Unit) {
         title = "开启无障碍权限",
         body = "「知时」需要无障碍权限来感知前台应用切换，从而在守护应用打开的瞬间弹出拦截浮层。\n\n" +
             "本服务只读取窗口切换事件的包名，不读取、不记录任何屏幕内容，也不会联网。\n\n" +
-            "HyperOS/MIUI 用户注意：开启后请在系统设置中允许本应用「自启动」并把省电策略设为「无限制」，" +
-            "否则进程被后台冻结时将无法弹出拦截浮层（见主界面的后台保活引导）。",
+            "部分系统会冻结/清理后台进程，导致无法弹出拦截浮层；请在系统设置中允许本应用自启动、" +
+            "关闭电池优化，小米/澎湃用户还需将省电策略设为「无限制」（见主界面的后台保活引导）。",
         buttonText = "去开启",
         onButton = {
             context.startActivity(
@@ -135,7 +146,8 @@ private fun UsageAccessGuideScreen() {
     val context = LocalContext.current
     GuidePage(
         title = "授予使用情况访问权限",
-        body = "兼容模式通过轮询应用使用情况感知前台切换（约 1–2 秒延迟）。\n\n" +
+        body = "兼容模式通过轮询应用使用情况感知前台切换（约 1–2 秒延迟）。该模式为实验性功能：" +
+            "可能存在较多未知 bug 与拦截问题，如无特殊需求推荐使用无障碍模式。\n\n" +
             "请在系统设置中允许「知时」查看使用情况；授权后还建议按设置页的兼容模式引导" +
             "关闭电池优化并保持常驻通知。",
         buttonText = "去授权",
