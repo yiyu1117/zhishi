@@ -21,22 +21,53 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 
 /**
- * 后台保活引导卡（两种检测模式通用）。
+ * 后台保活引导卡（面向所有系统，两种检测模式通用）。
  *
- * 背景（真机实测，HyperOS 3）：应用切后台后会被系统 cgroup 冻结（`cgroup.events frozen 1`），
- * 无障碍绑定、电池优化白名单均不能豁免，前台服务也只能延迟几分钟 —— 冻结期间事件回调全部
- * 挂起，拦截浮层失灵。唯一可靠解法是用户手动授予：自启动权限、省电策略「无限制」、
- * 最近任务锁定。这些均无公开 API，只能引导。
+ * 部分系统会冻结或清理后台进程（实测如 HyperOS 3 的 cgroup 冻结）：冻结期间事件回调
+ * 全部挂起，无障碍与轮询都收不到前台切换，拦截浮层失灵。各授权项大多没有公开 API，
+ * 只能引导：
+ * - 电池优化豁免：全系统通用 API，实时探测 + 系统豁免弹窗直达
+ *   （复用轮询引导卡的探测与直达逻辑及状态圆点版式）；
+ * - 自启动：无公开 API，中性文案引导，MIUI 尝试直达（失败回退应用详情页）；
+ * - 最近任务锁定：无公开 API，仅说明。
+ *
+ * 从系统设置返回（ON_RESUME）时自动刷新探测状态。
  */
 @Composable
 fun KeepAliveGuideCard(modifier: Modifier = Modifier, onDismiss: () -> Unit) {
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+
+    var batteryExempt by remember { mutableStateOf(false) }
+
+    fun refresh() {
+        batteryExempt = isIgnoringBatteryOptimizations(context)
+    }
+
+    // 用户跳系统设置授权后返回本页时刷新状态
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) refresh()
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+    LaunchedEffect(Unit) { refresh() }
 
     Card(modifier = modifier.fillMaxWidth()) {
         Column(
@@ -48,30 +79,30 @@ fun KeepAliveGuideCard(modifier: Modifier = Modifier, onDismiss: () -> Unit) {
                 style = MaterialTheme.typography.titleMedium,
             )
             Text(
-                "实测 HyperOS/MIUI 会冻结后台进程：被冻结期间无障碍与轮询都收不到前台切换，" +
-                    "打开守护应用不会弹浮层（表现为时好时坏）。请完成以下授权：",
+                "部分系统会冻结或清理后台进程：被冻结期间无障碍与轮询都收不到前台切换，" +
+                    "打开受管应用不会弹浮层（表现为时好时坏）。请完成以下授权：",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
 
             GuideRow(
+                title = "电池优化豁免",
+                description = "关键项：关闭电池优化，降低本应用后台被系统冻结或清理的概率。",
+                granted = batteryExempt,
+                actionLabel = if (batteryExempt) null else "去设置",
+                onAction = { requestIgnoreBatteryOptimizations(context) },
+            )
+            GuideRow(
                 title = "自启动权限",
-                description = "关键项：HyperOS 只要不冻结「已允许自启动」应用的后台。" +
-                    "设置 → 应用设置 → 应用管理 → 知时 → 自启动。",
+                description = "关键项：允许「知时」自启动与后台运行" +
+                    "（各 ROM 入口不同，一般在应用信息或安全中心/手机管家中）。",
                 granted = null,
                 actionLabel = "尝试直达",
                 onAction = { openAutoStartSettings(context) },
             )
             GuideRow(
-                title = "省电策略：无限制",
-                description = "应用信息 → 省电策略 → 无限制（智能限制后台运行仍会冻结）。",
-                granted = null,
-                actionLabel = "去设置",
-                onAction = { openAppDetailsSettings(context) },
-            )
-            GuideRow(
                 title = "最近任务锁定",
-                description = "在最近任务中下拉「知时」卡片点锁定（各 ROM 入口略有差异）。",
+                description = "在最近任务中下拉「知时」卡片点锁定（部分 ROM 支持，入口略有差异）。",
                 granted = null,
                 actionLabel = null,
                 onAction = null,
