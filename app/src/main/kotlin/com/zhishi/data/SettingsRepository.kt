@@ -12,6 +12,7 @@ import com.zhishi.core.model.DisciplineLockConfig
 import com.zhishi.core.model.TimeParams
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 
 private val Context.settingsDataStore by preferencesDataStore(name = "zhishi_settings")
@@ -125,6 +126,17 @@ class SettingsRepository(private val appContext: Context) {
 
     suspend fun setDebugToolsEnabled(enabled: Boolean) {
         dataStore.edit { it[DEBUG_TOOLS_KEY] = enabled }
+    }
+
+    /**
+     * v1.2.1 对账（票 06）：调试节改为完全隐藏后，节可见性由 debugToolsEnabled（「调试模式解锁」
+     * 总开关）驱动。旧版本可能残留 debugTools=false 而状态调试悬浮窗仍开着（debugMode=true）——
+     * 升级后调试节不再显示，该悬浮窗将无处可关；此对账把孤悬的状态调试强制关闭。
+     * 此后 UI 保证「关总开关连带关状态调试」，正常使用不会触发本逻辑；由协调器启动时调用。
+     */
+    suspend fun clearOrphanDebugOverlayIfNeeded() {
+        if (debugToolsEnabled.first() || !debugMode.first()) return
+        setDebugMode(false)
     }
 
     suspend fun setNotificationUsageVisible(enabled: Boolean) {

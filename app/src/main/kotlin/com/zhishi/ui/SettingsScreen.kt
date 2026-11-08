@@ -2,8 +2,11 @@
 
 package com.zhishi.ui
 
+import android.content.Intent
+import android.net.Uri
 import android.widget.Toast
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -22,7 +25,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -45,20 +47,25 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.zhishi.AppGraph
 import com.zhishi.core.model.DetectionMode
 import com.zhishi.data.SettingsRepository
 import kotlinx.coroutines.launch
 
+/** 项目开源仓库地址（「关于」节展示与跳转）。 */
+private const val REPO_URL = "https://github.com/yiyu1117/zhishi"
+
 /**
- * 设置屏：自律锁 / 检测模式 / 默认参数（对新创建的分组生效）/ 分组配置导入导出。
+ * 设置屏：自律锁 / 检测模式 / 默认参数（对新创建的分组生效）/ 分组配置导入导出 /
+ * 调试模式（解锁后显示）/ 关于。
  * 自律锁生效中（时段外）时本页所有写操作禁用（导出除外——只读操作），仅保留浏览与返回。
+ * 调试节默认完全隐藏（票 06）：双击「关于」节版本号解锁（debugToolsEnabled 持久化）。
  */
 @Composable
 internal fun SettingsScreen(onBack: () -> Unit) {
@@ -73,11 +80,19 @@ internal fun SettingsScreen(onBack: () -> Unit) {
     val debugTools by repo.debugToolsEnabled.collectAsStateWithLifecycle(initialValue = false)
     val notificationUsage by repo.notificationUsageVisible.collectAsStateWithLifecycle(initialValue = false)
     val context = LocalContext.current
+    // 「关于」节版本号：随构建 versionName 显示（PackageManager 读取，BuildConfig 未启用）
+    val versionName = remember(context) {
+        runCatching {
+            context.packageManager.getPackageInfo(context.packageName, 0).versionName
+        }.getOrNull().orEmpty().ifEmpty { "未知" }
+    }
 
     var editRequest by remember { mutableStateOf<NumberEditRequest?>(null) }
     var editingStart by remember { mutableStateOf(false) }
     var editingEnd by remember { mutableStateOf(false) }
     var showLockEnableDialog by remember { mutableStateOf(false) }
+    // 切向轮询的实验性确认弹窗（票 05）：取消不切换，确认才走原 setter
+    var showPollingConfirm by remember { mutableStateOf(false) }
 
     val tp = params
     val currentMode = mode
@@ -177,18 +192,24 @@ internal fun SettingsScreen(onBack: () -> Unit) {
 
             // region 检测模式
             SettingsSection(title = "检测模式") {
+                // 票 05：每次切向轮询先弹实验性确认（取消不切换）；切回无障碍/重复点选不拦
+                val selectMode: (DetectionMode) -> Unit = { candidate ->
+                    if (shouldConfirmPollingSwitch(currentMode, candidate)) {
+                        showPollingConfirm = true
+                    } else {
+                        scope.launch { repo.setDetectionMode(candidate) }
+                    }
+                }
                 DetectionMode.entries.forEach { candidate ->
                     Row(
                         Modifier.fillMaxWidth()
-                            .clickable(enabled = !lock.locked) {
-                                scope.launch { repo.setDetectionMode(candidate) }
-                            },
+                            .clickable(enabled = !lock.locked) { selectMode(candidate) },
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         RadioButton(
                             selected = currentMode == candidate,
                             enabled = !lock.locked,
-                            onClick = { scope.launch { repo.setDetectionMode(candidate) } },
+                            onClick = { selectMode(candidate) },
                         )
                         Column(Modifier.weight(1f)) {
                             Text(detectionModeLabel(candidate), style = MaterialTheme.typography.bodyLarge)
@@ -457,56 +478,114 @@ internal fun SettingsScreen(onBack: () -> Unit) {
             GroupConfigExportSection()
             // endregion
 
-            // region 调试模式（置于最底，排查用；v1.2 起默认折叠）
-            CollapsibleSettingsSection(title = "调试模式", initiallyExpanded = false) {
+            // region 调试模式（票 06：默认完全隐藏——双击下方「关于」节版本号解锁；
+            // debugToolsEnabled 语义升级为「调试模式解锁」总开关，节随其显示）
+            if (debugTools) {
+                SettingsSection(title = "调试模式") {
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text("状态调试悬浮窗", style = MaterialTheme.typography.bodyLarge)
+                            Text(
+                                "屏幕角落的小悬浮窗实时列出全部守护应用的状态与倒计时" +
+                                    "（会话/宽限/延时/冷却，支持多应用）；不可触摸、不影响操作。",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Switch(
+                            checked = debugMode,
+                            enabled = !lock.locked,
+                            onCheckedChange = { on -> scope.launch { repo.setDebugMode(on) } },
+                        )
+                    }
+                    Spacer(Modifier.height(2.dp))
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text("调试工具悬浮窗", style = MaterialTheme.typography.bodyLarge)
+                            Text(
+                                "可点按的小悬浮窗：重置所有计时、按应用注入指定状态与时间、" +
+                                    "查看/复制应用内日志，方便不等冷却直接测试。" +
+                                    "关闭本开关将隐藏整个调试节（状态调试悬浮窗一并关闭）。",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Switch(
+                            checked = debugTools,
+                            enabled = !lock.locked,
+                            onCheckedChange = { on ->
+                                scope.launch {
+                                    repo.setDebugToolsEnabled(on)
+                                    // 关闭解锁总开关 → 整节隐藏，连带关闭状态调试悬浮窗
+                                    //（避免悬浮窗仍在跑而调试节已隐藏、无处可关的死锁）
+                                    if (!on) repo.setDebugMode(false)
+                                }
+                            },
+                        )
+                    }
+                    // 「重置所有计时」按钮已删除（票 06）：重置仅存在于调试工具悬浮窗，
+                    // 且需面板内联二次确认（见 DebugToolsPanel）
+                }
+            }
+            // endregion
+
+            // region 关于（置于最底）
+            SettingsSection(title = "关于") {
+                // 版本号行：双击解锁调试模式（Toast 反馈；自律锁生效中与其他写操作一致 fail-closed）
                 Row(
-                    Modifier.fillMaxWidth(),
+                    Modifier
+                        .fillMaxWidth()
+                        .pointerInput(lock.locked) {
+                            detectTapGestures(onDoubleTap = {
+                                if (!lock.locked) {
+                                    scope.launch { repo.setDebugToolsEnabled(true) }
+                                    Toast.makeText(context, "已解锁调试模式", Toast.LENGTH_SHORT).show()
+                                }
+                            })
+                        },
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        "版本号",
+                        style = MaterialTheme.typography.bodyLarge,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Text(
+                        versionName,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                // 开源地址行：浏览器打开项目仓库
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .clickable {
+                            runCatching {
+                                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(REPO_URL)))
+                            }
+                        },
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Column(Modifier.weight(1f)) {
-                        Text("状态调试悬浮窗", style = MaterialTheme.typography.bodyLarge)
+                        Text("开源地址", style = MaterialTheme.typography.bodyLarge)
                         Text(
-                            "屏幕角落的小悬浮窗实时列出全部守护应用的状态与倒计时" +
-                                "（会话/宽限/延时/冷却，支持多应用）；不可触摸、不影响操作。",
+                            REPO_URL.removePrefix("https://"),
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
-                    Switch(
-                        checked = debugMode,
-                        enabled = !lock.locked,
-                        onCheckedChange = { on -> scope.launch { repo.setDebugMode(on) } },
+                    Text(
+                        "↗",
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                }
-                Spacer(Modifier.height(2.dp))
-                Row(
-                    Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Column(Modifier.weight(1f)) {
-                        Text("调试工具悬浮窗", style = MaterialTheme.typography.bodyLarge)
-                        Text(
-                            "可点按的小悬浮窗：重置所有计时、按应用注入指定状态与时间、" +
-                                "查看/复制应用内日志，方便不等冷却直接测试。",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                    Switch(
-                        checked = debugTools,
-                        enabled = !lock.locked,
-                        onCheckedChange = { on -> scope.launch { repo.setDebugToolsEnabled(on) } },
-                    )
-                }
-                Spacer(Modifier.height(2.dp))
-                Button(
-                    onClick = {
-                        AppGraph.coordinator.resetAllMachines()
-                        Toast.makeText(context, "已重置所有计时（会话/冷却/当日累计）", Toast.LENGTH_SHORT).show()
-                    },
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Text("重置所有计时", fontSize = 15.sp)
                 }
             }
             // endregion
@@ -533,6 +612,16 @@ internal fun SettingsScreen(onBack: () -> Unit) {
             dismissButton = {
                 TextButton(onClick = { showLockEnableDialog = false }) { Text("取消") }
             },
+        )
+    }
+
+    if (showPollingConfirm) {
+        PollingModeConfirmDialog(
+            onConfirm = {
+                showPollingConfirm = false
+                scope.launch { repo.setDetectionMode(DetectionMode.POLLING) }
+            },
+            onDismiss = { showPollingConfirm = false },
         )
     }
 
@@ -579,37 +668,6 @@ internal fun SettingsSection(title: String, content: @Composable ColumnScope.() 
         ) {
             Text(title, style = MaterialTheme.typography.titleMedium)
             content()
-        }
-    }
-}
-
-/** 可折叠的设置节（v1.2）：标题行点击展开/收起，[initiallyExpanded] 控制默认态。 */
-@Composable
-private fun CollapsibleSettingsSection(
-    title: String,
-    initiallyExpanded: Boolean,
-    content: @Composable ColumnScope.() -> Unit,
-) {
-    var expanded by remember { mutableStateOf(initiallyExpanded) }
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(
-            Modifier.fillMaxWidth().padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .clickable { expanded = !expanded },
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(title, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
-                Text(
-                    if (expanded) "▾" else "▸",
-                    style = MaterialTheme.typography.titleMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            if (expanded) content()
         }
     }
 }
@@ -920,5 +978,6 @@ private fun detectionModeLabel(mode: DetectionMode): String = when (mode) {
 
 private fun detectionModeDesc(mode: DetectionMode): String = when (mode) {
     DetectionMode.ACCESSIBILITY -> "毫秒级响应，无常驻服务。"
-    DetectionMode.POLLING -> "有 1–2 秒检测延迟，需常驻通知、电池优化豁免与开机自启。"
+    // 票 05：轮询为实验性功能，描述行直接标注（不进弹窗也能看到风险）
+    DetectionMode.POLLING -> "实验性功能：有 1–2 秒检测延迟，需常驻通知、电池优化豁免与开机自启。"
 }

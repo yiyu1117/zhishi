@@ -4,6 +4,7 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.graphics.PixelFormat
+import android.os.SystemClock
 import android.provider.Settings
 import android.util.Log
 import android.view.Gravity
@@ -32,6 +33,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -48,6 +50,7 @@ import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import androidx.lifecycle.setViewTreeLifecycleOwner
 import com.zhishi.core.machine.GuardState
 import com.zhishi.log.AppLog
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.StateFlow
 import kotlin.math.ceil
 
@@ -206,6 +209,19 @@ fun DebugToolsPanel(
     var showLogs by remember { mutableStateOf(false) }
     var note by remember { mutableStateOf<String?>(null) }
 
+    // 重置内联二次确认（票 06）：悬浮窗不可获焦，无法承载模态对话框，
+    // 以「按钮变确认态 + 取消 + 超时自动复位」就地确认
+    val resetGate = remember { InlineConfirmGate(RESET_CONFIRM_TIMEOUT_MILLIS) }
+    val resetPending by resetGate.pending.collectAsState()
+
+    // 待确认态到点询问状态机超窗复位（与确认窗口同一常量；取消/确认后本协程随键变化取消）
+    LaunchedEffect(resetPending) {
+        if (resetPending) {
+            delay(RESET_CONFIRM_TIMEOUT_MILLIS)
+            resetGate.expireIfDue(SystemClock.elapsedRealtime())
+        }
+    }
+
     fun noteAndClear(text: String) {
         note = text
     }
@@ -251,14 +267,41 @@ fun DebugToolsPanel(
                 TextButton(onClick = { showLogs = false }) { Text("返回菜单", fontSize = 12.sp) }
             }
         } else {
-            Button(onClick = {
-                onResetAll()
-                noteAndClear("已重置所有计时（会话/冷却/当日累计）")
-            }, modifier = Modifier.fillMaxWidth()) {
-                Text("重置所有计时", fontSize = 13.sp)
+            if (!resetPending) {
+                Button(
+                    onClick = { resetGate.arm(SystemClock.elapsedRealtime()) },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("重置所有计时", fontSize = 13.sp)
+                }
+            } else {
+                // 内联二次确认态：确认才执行，取消不执行，超窗自动复位（由上方 LaunchedEffect 驱动）
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Button(
+                        onClick = {
+                            if (resetGate.confirm(SystemClock.elapsedRealtime())) {
+                                onResetAll()
+                                noteAndClear("已重置所有计时（会话/冷却/当日累计）")
+                            }
+                        },
+                        modifier = Modifier.weight(1f),
+                    ) { Text("确认重置", fontSize = 13.sp) }
+                    OutlinedButton(
+                        onClick = { resetGate.cancel() },
+                        modifier = Modifier.weight(1f),
+                    ) { Text("取消", fontSize = 13.sp) }
+                }
             }
             Spacer(Modifier.height(4.dp))
-            Text("重置 = 清空会话/冷却/宽限与当日累计，回到待选择。", fontSize = 10.sp, color = DebugOnDim)
+            Text(
+                "重置 = 清空会话/冷却/宽限与当日累计，回到待选择；" +
+                    "确认态 ${RESET_CONFIRM_TIMEOUT_MILLIS / 1000} 秒内未确认将自动取消。",
+                fontSize = 10.sp,
+                color = DebugOnDim,
+            )
 
             Spacer(Modifier.height(10.dp))
             Text("按应用注入状态", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = DebugOn)
@@ -336,6 +379,9 @@ private val FORMATTER_PREVIEW = java.text.SimpleDateFormat("MM-dd HH:mm:ss.SSS",
 // ---------------------------------------------------------------------------
 // 公共
 // ---------------------------------------------------------------------------
+
+/** 「重置所有计时」内联二次确认窗口：超时自动复位（防悬浮窗确认态久挂）。 */
+private const val RESET_CONFIRM_TIMEOUT_MILLIS = 5_000L
 
 private val DebugScrim = Color(0xCC101418)
 private val DebugOn = Color(0xFFE6EDF3)
