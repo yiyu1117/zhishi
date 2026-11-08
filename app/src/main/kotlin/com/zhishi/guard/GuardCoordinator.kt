@@ -210,6 +210,9 @@ class GuardCoordinator(
         scope.launch {
             // v1.2 一次性迁移：全局默认参数的智能时长联动/同组共享冷却置开（新分组默认启用）
             settings.migrateV12DefaultSwitchesIfNeeded()
+            // v1.2.1 对账：清理「调试工具已关而状态调试悬浮窗仍开」的孤悬残留
+            // （票 06 调试节深度隐藏后该悬浮窗将无处可关）
+            settings.clearOrphanDebugOverlayIfNeeded()
             val day = todayIso()
             // 跨日恢复：旧自然日落盘的 QUOTA_EXHAUSTED 等同 DayChanged 重置（丢弃，按 INACTIVE 重建）——
             // 启动时 currentDay 已是今天，DayChanged 不会再触发，不丢弃会把用户按昨日额度禁用一整天。
